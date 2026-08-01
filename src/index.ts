@@ -12,7 +12,7 @@ const client = new Client({
     intents: [GatewayIntentBits.Guilds]
 })
 
-client.once(Events.ClientReady, (c) => {
+client.once(Events.ClientReady, () => {
     console.log('Starting...')
 })
 

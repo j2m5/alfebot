@@ -1,0 +1,9 @@
+services:
+  alfebot:
+    build: .
+    container_name: alfebot
+
+    restart: unless-stopped
+
+    env_file:
+      - .env
