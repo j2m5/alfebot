@@ -1,9 +1,17 @@
 services:
   alfebot:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+
     container_name: alfebot
 
     restart: unless-stopped
 
     env_file:
-      - .env
+      - ../.env
+
+    deploy:
+      resources:
+        limits:
+          memory: 512M
