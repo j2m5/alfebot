@@ -1,0 +1,23 @@
+{
+  "name": "alfebot",
+  "author": "Oxyel",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "deploy": "tsx src/deploy-commands.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "tsx": "^4.23.1",
+    "typescript": "^5.5.3"
+  },
+  "private": true
+}
