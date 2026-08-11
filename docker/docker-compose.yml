@@ -11,6 +11,9 @@ services:
     env_file:
       - ../.env
 
+    volumes:
+      - alfebot-data:/app/data
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -18,3 +21,6 @@ services:
       resources:
         limits:
           memory: 512M
+
+volumes:
+  alfebot-data:

@@ -1,6 +1,8 @@
 import 'dotenv/config'
 import { Client, Events, GatewayIntentBits } from 'discord.js'
 import { askOllama } from './ollama.js'
+import { splitText } from './text.js'
+import { startDevTracker } from './devtracker.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -14,6 +16,8 @@ const client = new Client({
 
 client.once(Events.ClientReady, () => {
     console.log('Starting...')
+
+    startDevTracker(client).catch((error) => console.error('[devtracker] сбой запуска:', error))
 })
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -49,35 +53,13 @@ async function sendLongReply(
 ): Promise<void> {
     const chunks = splitText(text)
 
+    if (chunks.length === 0) chunks.push('Модель не вернула текст.')
+
     await interaction.editReply(chunks[0])
 
     for (const chunk of chunks.slice(1)) {
         await interaction.followUp(chunk)
     }
-}
-
-function splitText(text: string, maxLength = 1900): string[] {
-    const chunks: string[] = []
-
-    let remaining = text
-
-    while (remaining.length > maxLength) {
-        let index = remaining.lastIndexOf("\n", maxLength)
-
-        if (index < 1) index = remaining.lastIndexOf(" ", maxLength)
-
-        if (index < 1) index = maxLength
-
-        chunks.push(remaining.slice(0, index).trim())
-
-        remaining = remaining.slice(index).trim()
-    }
-
-    if (remaining) chunks.push(remaining)
-
-    return chunks.length > 0
-        ? chunks
-        : ["Модель не вернула текст."]
 }
 
 client.login(token)

@@ -1,3 +1,5 @@
+import { splitText } from './text.js'
+
 type OllamaChatResponse = {
     message: {
         role: 'assistant',
@@ -5,7 +7,23 @@ type OllamaChatResponse = {
     }
 }
 
-export async function askOllama(prompt: string): Promise<string> {
+type OllamaMessage = {
+    role: 'system' | 'user'
+    content: string
+}
+
+const TRANSLATION_CHUNK_SIZE = 3000
+
+const TRANSLATION_SYSTEM_PROMPT = [
+    'Ты профессиональный переводчик. Переводи текст с английского на русский.',
+    'Сохраняй разбиение на абзацы.',
+    'Не переводи имена собственные и игровые термины Star Wars: The Old Republic:',
+    'названия классов, дисциплин, планет, способностей и предметов оставляй как в оригинале.',
+    'Ничего не добавляй от себя, не комментируй и не сокращай.',
+    'В ответе верни только перевод.'
+].join(' ')
+
+async function chatOllama(messages: OllamaMessage[], timeoutMs: number, numCtx?: number): Promise<string> {
     const baseUrl = process.env.OLLAMA_URL
     const model = process.env.OLLAMA_MODEL
 
@@ -16,19 +34,11 @@ export async function askOllama(prompt: string): Promise<string> {
         },
         body: JSON.stringify({
             model,
-            messages: [
-                {
-                    role: 'system',
-                    content: 'Ты полезный ассистент в Discord. Отвечай по русски. Отвечай понятно и без лишней воды. ' + process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART,
-                },
-                {
-                    role: 'user',
-                    content: prompt
-                }
-            ],
-            stream: false
+            messages,
+            stream: false,
+            ...(numCtx ? { options: { num_ctx: numCtx } } : {})
         }),
-        signal: AbortSignal.timeout(120_000)
+        signal: AbortSignal.timeout(timeoutMs)
     })
 
     if (!response.ok) {
@@ -40,4 +50,38 @@ export async function askOllama(prompt: string): Promise<string> {
     const data = await response.json() as OllamaChatResponse
 
     return data.message.content.trim()
+}
+
+export async function askOllama(prompt: string): Promise<string> {
+    return chatOllama([
+        {
+            role: 'system',
+            content: 'Ты полезный ассистент в Discord. Отвечай по русски. Отвечай понятно и без лишней воды. ' + process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART,
+        },
+        {
+            role: 'user',
+            content: prompt
+        }
+    ], 120_000)
+}
+
+export async function translateToRussian(text: string): Promise<string> {
+    const parts = splitText(text, TRANSLATION_CHUNK_SIZE)
+
+    const translated: string[] = []
+
+    for (const part of parts) {
+        translated.push(await chatOllama([
+            {
+                role: 'system',
+                content: TRANSLATION_SYSTEM_PROMPT
+            },
+            {
+                role: 'user',
+                content: part
+            }
+        ], 240_000, 8192))
+    }
+
+    return translated.join('\n\n')
 }

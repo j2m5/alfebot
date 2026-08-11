@@ -9,11 +9,13 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "deploy": "tsx src/deploy-commands.ts"
+    "deploy": "tsx src/deploy-commands.ts",
+    "test": "tsx --test test/text.test.ts test/rss.test.ts test/state.test.ts test/devtracker.test.ts"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "fast-xml-parser": "^5.10.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
