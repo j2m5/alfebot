@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { Client, Events, GatewayIntentBits } from 'discord.js'
 import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
+import { startDevTracker } from './devtracker.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -15,6 +16,8 @@ const client = new Client({
 
 client.once(Events.ClientReady, () => {
     console.log('Starting...')
+
+    void startDevTracker(client)
 })
 
 client.on(Events.InteractionCreate, async (interaction) => {
