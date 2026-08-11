@@ -17,7 +17,7 @@ const client = new Client({
 client.once(Events.ClientReady, () => {
     console.log('Starting...')
 
-    void startDevTracker(client)
+    startDevTracker(client).catch((error) => console.error('[devtracker] сбой запуска:', error))
 })
 
 client.on(Events.InteractionCreate, async (interaction) => {

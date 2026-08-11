@@ -99,3 +99,9 @@ test('записи без ссылки пропускаются', () => {
 
     assert.deepEqual(parseDevTrackerFeed(broken), [])
 })
+
+test('записи с относительной (не абсолютной) ссылкой пропускаются', () => {
+    const broken = `<?xml version="1.0"?><rss version="2.0"><channel><item><title>Relative link</title><link>/relative/path</link><description>text</description></item></channel></rss>`
+
+    assert.deepEqual(parseDevTrackerFeed(broken), [])
+})

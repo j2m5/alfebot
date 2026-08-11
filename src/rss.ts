@@ -46,7 +46,7 @@ export function parseDevTrackerFeed(xml: string): DevTrackerItem[] {
     for (const raw of rawItems) {
         const link = String(raw.link ?? '').trim()
 
-        if (!link) continue
+        if (!link || !URL.canParse(link)) continue
 
         const publishedAt = new Date(String(raw.pubDate ?? ''))
 

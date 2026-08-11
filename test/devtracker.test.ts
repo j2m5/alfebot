@@ -59,6 +59,43 @@ test('readConfig игнорирует мусорные числа', () => {
     assert.equal(config?.seedPostCount, 0)
 })
 
+test('readConfig ограничивает слишком маленький интервал минимумом в 1 минуту', () => {
+    const config = readConfig({
+        DEV_TRACKER_CHANNEL_ID: '123',
+        DEV_TRACKER_INTERVAL_MINUTES: '0.5'
+    })
+
+    assert.equal(config?.intervalMs, 1 * 60_000)
+})
+
+test('readConfig ограничивает слишком большой интервал максимумом в 1440 минут', () => {
+    const config = readConfig({
+        DEV_TRACKER_CHANNEL_ID: '123',
+        DEV_TRACKER_INTERVAL_MINUTES: '1000000000'
+    })
+
+    assert.equal(config?.intervalMs, 1440 * 60_000)
+})
+
+test('readConfig с нечисловым интервалом использует значение по умолчанию 20 минут', () => {
+    const config = readConfig({
+        DEV_TRACKER_CHANNEL_ID: '123',
+        DEV_TRACKER_INTERVAL_MINUTES: 'что-то'
+    })
+
+    assert.equal(config?.intervalMs, 20 * 60_000)
+})
+
+test('readConfig: ограничение интервала не влияет на seedPostCount', () => {
+    const config = readConfig({
+        DEV_TRACKER_CHANNEL_ID: '123',
+        DEV_TRACKER_INTERVAL_MINUTES: '1000000000',
+        DEV_TRACKER_SEED_POST_COUNT: '0'
+    })
+
+    assert.equal(config?.seedPostCount, 0)
+})
+
 test('selectNewItems отбрасывает уже опубликованные', () => {
     const selected = selectNewItems(feed, new Set(['1', '2', '3']), MAX_POSTS_PER_TICK, 'oldest')
 

@@ -18,6 +18,8 @@ export const MAX_POSTS_PER_TICK = 10
 const DEFAULT_FEED_URL = 'https://forums.swtor.com/discover/6.xml'
 const DEFAULT_STATE_FILE = './data/devtracker.json'
 const DEFAULT_INTERVAL_MINUTES = 20
+const MIN_INTERVAL_MINUTES = 1
+const MAX_INTERVAL_MINUTES = 1440
 
 const EMBED_COLOR = 0xE6B800
 const EMBED_TITLE_LIMIT = 256
@@ -30,11 +32,14 @@ export function readConfig(env: NodeJS.ProcessEnv): DevTrackerConfig | null {
 
     if (!channelId) return null
 
+    const intervalMinutes = positiveNumber(env.DEV_TRACKER_INTERVAL_MINUTES, DEFAULT_INTERVAL_MINUTES)
+    const clampedIntervalMinutes = Math.min(Math.max(intervalMinutes, MIN_INTERVAL_MINUTES), MAX_INTERVAL_MINUTES)
+
     return {
         channelId,
         feedUrl: env.DEV_TRACKER_FEED_URL?.trim() || DEFAULT_FEED_URL,
         stateFile: env.DEV_TRACKER_STATE_FILE?.trim() || DEFAULT_STATE_FILE,
-        intervalMs: positiveNumber(env.DEV_TRACKER_INTERVAL_MINUTES, DEFAULT_INTERVAL_MINUTES) * 60_000,
+        intervalMs: clampedIntervalMinutes * 60_000,
         seedPostCount: positiveNumber(env.DEV_TRACKER_SEED_POST_COUNT, 0)
     }
 }
@@ -105,6 +110,14 @@ export async function startDevTracker(client: Client): Promise<void> {
 
     const postedIds = new Set(await loadPostedIds(config.stateFile))
 
+    try {
+        await savePostedIds(config.stateFile, [...postedIds])
+    } catch (error) {
+        console.error(`[devtracker] файл состояния ${config.stateFile} недоступен для записи, лента отключена:`, error)
+
+        return
+    }
+
     let isRunning = false
 
     const tick = async (): Promise<void> => {
@@ -137,7 +150,10 @@ async function runTick(
     config: DevTrackerConfig,
     postedIds: Set<string>
 ): Promise<void> {
-    const isFirstRun = !(await stateFileExists(config.stateFile))
+    // Файл может существовать, но быть непригодным (повреждён, недоступен для чтения, каталог вместо файла) —
+    // loadPostedIds в таком случае молча возвращает []. Пустой набор ID приравниваем к первому запуску,
+    // ведь у реально записанного состояния ID не бывает нулю.
+    const isFirstRun = !(await stateFileExists(config.stateFile)) || postedIds.size === 0
 
     const items = await fetchDevTrackerFeed(config.feedUrl)
 
@@ -172,19 +188,39 @@ async function runTick(
             console.error(`[devtracker] перевод не удался для ${item.id}:`, error)
         }
 
-        const embeds = buildEmbeds(item, translation)
+        // Любая ошибка ниже (включая падение buildEmbeds) не должна прерывать цикл: непойманный
+        // throw заблокировал бы очередь навсегда, т.к. selectNewItems снова выбрал бы этот же
+        // элемент первым на следующем тике.
+        let anySent = false
 
-        for (const [index, embed] of embeds.entries()) {
-            await channel.send({ embeds: [embed] })
+        try {
+            const embeds = buildEmbeds(item, translation)
 
-            if (index < embeds.length - 1) await delay(SEND_DELAY_MS)
+            for (const [index, embed] of embeds.entries()) {
+                await channel.send({ embeds: [embed] })
+
+                anySent = true
+
+                if (index < embeds.length - 1) await delay(SEND_DELAY_MS)
+            }
+        } catch (error) {
+            console.error(`[devtracker] ошибка при публикации ${item.id}:`, error)
         }
 
-        postedIds.add(item.id)
+        // Ничего не ушло в канал — не помечаем как опубликованное, повторим на следующем тике.
+        // Хоть что-то ушло — помечаем: повторная публикация урезанной серии раз в 20 минут хуже,
+        // чем один раз опубликовать её не полностью.
+        if (anySent) {
+            postedIds.add(item.id)
 
-        await savePostedIds(config.stateFile, [...postedIds])
+            try {
+                await savePostedIds(config.stateFile, [...postedIds])
 
-        console.log(`[devtracker] опубликовано ${item.id}: ${item.title}`)
+                console.log(`[devtracker] опубликовано ${item.id}: ${item.title}`)
+            } catch (error) {
+                console.error(`[devtracker] не удалось сохранить состояние после публикации ${item.id}:`, error)
+            }
+        }
 
         await delay(SEND_DELAY_MS)
     }
