@@ -105,7 +105,6 @@ export async function startDevTracker(client: Client): Promise<void> {
 
     const postedIds = new Set(await loadPostedIds(config.stateFile))
 
-    let isFirstRun = !(await stateFileExists(config.stateFile))
     let isRunning = false
 
     const tick = async (): Promise<void> => {
@@ -118,9 +117,7 @@ export async function startDevTracker(client: Client): Promise<void> {
         isRunning = true
 
         try {
-            await runTick(channel, config, postedIds, isFirstRun)
-
-            isFirstRun = false
+            await runTick(channel, config, postedIds)
         } catch (error) {
             console.error('[devtracker] проверка не удалась:', error)
         } finally {
@@ -138,9 +135,10 @@ export async function startDevTracker(client: Client): Promise<void> {
 async function runTick(
     channel: SendableChannels,
     config: DevTrackerConfig,
-    postedIds: Set<string>,
-    isFirstRun: boolean
+    postedIds: Set<string>
 ): Promise<void> {
+    const isFirstRun = !(await stateFileExists(config.stateFile))
+
     const items = await fetchDevTrackerFeed(config.feedUrl)
 
     if (items.length === 0) {
