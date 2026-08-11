@@ -10,7 +10,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "deploy": "tsx src/deploy-commands.ts",
-    "test": "tsx --test test/text.test.ts test/rss.test.ts test/state.test.ts"
+    "test": "tsx --test test/text.test.ts test/rss.test.ts test/state.test.ts test/devtracker.test.ts"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
