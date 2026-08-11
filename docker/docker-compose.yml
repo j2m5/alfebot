@@ -14,8 +14,7 @@ services:
     volumes:
       - alfebot-data:/app/data
 
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
 
     deploy:
       resources:
