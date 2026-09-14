@@ -11,3 +11,7 @@ yarn-error.log*
 .vscode/*
 .env
 /data
+
+/dist
+/.idea
+.DS_Store
