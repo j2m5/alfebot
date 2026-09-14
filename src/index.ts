@@ -3,6 +3,7 @@ import { Client, Events, GatewayIntentBits } from 'discord.js'
 import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
+import { startSanich } from './sanich.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -11,8 +12,10 @@ if (!token) {
 }
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 })
+
+startSanich(client)
 
 client.once(Events.ClientReady, () => {
     console.log('Starting...')
