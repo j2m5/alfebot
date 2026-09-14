@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { REST, Routes, SlashCommandBuilder } from 'discord.js'
+import { InteractionContextType, REST, Routes, SlashCommandBuilder } from 'discord.js'
 
 const token = process.env.DISCORD_TOKEN
 const clientId = process.env.DISCORD_CLIENT_ID
@@ -17,6 +17,11 @@ const commands = [
                 .setDescription('Prompt to ask from Alfe')
                 .setRequired(true)
         )
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('san')
+        .setDescription('Send :sanich: to the chat')
+        .setContexts(InteractionContextType.Guild)
         .toJSON()
 ]
 

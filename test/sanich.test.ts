@@ -1,7 +1,32 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { Collection } from 'discord.js'
 
-import { SANICH_ROLE_ID, shouldReplySanich, type SanichEmbed, type SanichMessage } from '../src/sanich.js'
+import {
+    SANICH_ROLE_ID,
+    sanichEmojiText,
+    shouldReplySanich,
+    type SanichEmbed,
+    type SanichMessage
+} from '../src/sanich.js'
+
+function guild(...names: string[]) {
+    const emojis = names.map((name, index) => [String(index), { name, toString: () => `<:${name}:${index}>` }] as const)
+
+    return { emojis: { cache: new Collection(emojis) } }
+}
+
+test('находит эмодзи sanich среди эмодзи сервера', () => {
+    assert.equal(sanichEmojiText(guild('kek', 'sanich')), '<:sanich:1>')
+})
+
+test('возвращает null, если эмодзи sanich на сервере нет', () => {
+    assert.equal(sanichEmojiText(guild('kek')), null)
+})
+
+test('возвращает null вне сервера', () => {
+    assert.equal(sanichEmojiText(null), null)
+})
 
 function embeds(...types: string[]): SanichEmbed[] {
     return types.map((type) => ({ data: { type } }))

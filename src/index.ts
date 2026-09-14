@@ -3,7 +3,7 @@ import { Client, Events, GatewayIntentBits } from 'discord.js'
 import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
-import { startSanich } from './sanich.js'
+import { replySan, startSanich } from './sanich.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -25,6 +25,11 @@ client.once(Events.ClientReady, () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand()) return
+
+    if (interaction.commandName === 'san') {
+        await replySan(interaction).catch((error) => console.error('[sanich] не удалось ответить на /san:', error))
+        return
+    }
 
     if (interaction.commandName !== 'ask') return
 
