@@ -4,6 +4,7 @@ import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
 import { replySan, startSanich } from './sanich.js'
+import { getServerEmojis } from './server-emojis.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -34,17 +35,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName !== 'ask') return
 
     const prompt = interaction.options.getString('prompt', true)
+    const deadline = AbortSignal.timeout(28_000)
 
     try {
         await interaction.deferReply()
 
-        const answer = await askOllama(prompt)
+        const emojis = await getServerEmojis(interaction.guild)
+        const answer = await askOllama(prompt, emojis, deadline)
 
         await sendLongReply(interaction, answer)
     } catch (error) {
         console.error(error)
 
-        const message = 'Алфе зодумолся... Попробуйте позже!'
+        const timedOut = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)
+        const message = timedOut
+            ? 'Алфе не дождался ответа модели за 30 секунд. Попробуйте ещё раз чуть позже!'
+            : 'Алфе зодумолся... Попробуйте позже!'
 
         if (interaction.deferred || interaction.replied) await interaction.editReply(message)
         else await interaction.reply(message)
