@@ -7,6 +7,24 @@ const emojis = [
     { id: '222222222222222222', name: 'dance', animated: true }
 ]
 
+test('история передаётся перед текущим вопросом, а обычный ask остаётся без истории', async (t) => {
+    const calls: any[] = []
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        calls.push(JSON.parse(String(options.body)).messages)
+        return Response.json({ message: { content: 'Кабачок' }, done: true })
+    })
+    await askOllama('Как он называется?', [], undefined, [
+        { role: 'user', content: 'Наш корабль называется Кабачок' },
+        { role: 'assistant', content: 'Запомнил название корабля.' }
+    ])
+    await askOllama('Другой канал')
+    assert.deepEqual(calls[0].map((m: any) => m.role), ['system', 'user', 'assistant', 'user'])
+    assert.equal(calls[0][1].content, 'Наш корабль называется Кабачок')
+    assert.equal(calls[0].at(-1).content, 'Как он называется?')
+    assert.equal(calls[1].length, 2)
+    assert.ok(!JSON.stringify(calls[1]).includes('Кабачок'))
+})
+
 test('ask отключает рассуждения, ограничивает генерацию и собирает поток без thinking', async (t) => {
     let body: any
     t.mock.method(globalThis, 'fetch', async (_url, options) => {

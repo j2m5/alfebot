@@ -1,10 +1,12 @@
 import 'dotenv/config'
-import { Client, Events, GatewayIntentBits } from 'discord.js'
+import { Client, Events, GatewayIntentBits, Partials, MessageFlags } from 'discord.js'
 import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
 import { replySan, startSanich } from './sanich.js'
 import { getServerEmojis } from './server-emojis.js'
+import { FloodChat, answerGate, answerError } from './flood-chat.js'
+import { FLOOD_CHANNEL_ID } from './conversation-memory.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -13,10 +15,13 @@ if (!token) {
 }
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+    partials: [Partials.Message]
 })
 
 startSanich(client)
+const floodChat = new FloodChat(client)
+floodChat.start()
 
 client.once(Events.ClientReady, () => {
     console.log('Starting...')
@@ -35,7 +40,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName !== 'ask') return
 
     const prompt = interaction.options.getString('prompt', true)
+    if (interaction.channelId === FLOOD_CHANNEL_ID) {
+        await floodChat.answerSlash(interaction, prompt).catch((error) => console.error('[chat] ошибка Discord:', error))
+        return
+    }
     const deadline = AbortSignal.timeout(28_000)
+    const release = answerGate.acquire()
+    if (!release) {
+        await interaction.reply({ content: 'Сейчас отвечаю на другой вопрос. Повтори обращение через несколько секунд.', flags: MessageFlags.Ephemeral })
+        return
+    }
 
     try {
         await interaction.deferReply()
@@ -47,20 +61,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
         console.error(error)
 
-        const timedOut = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)
-        const message = timedOut
-            ? 'Алфе не дождался ответа модели за 30 секунд. Попробуйте ещё раз чуть позже!'
-            : 'Алфе зодумолся... Попробуйте позже!'
+        const message = answerError(error)
 
         if (interaction.deferred || interaction.replied) await interaction.editReply(message)
         else await interaction.reply(message)
-    }
+    } finally { release() }
 })
 
 async function sendLongReply(
     interaction: {
-        editReply(content: string): Promise<unknown>
-        followUp(content: string): Promise<unknown>
+        editReply(options: { content: string; allowedMentions: { parse: never[] } }): Promise<unknown>
+        followUp(options: { content: string; allowedMentions: { parse: never[] } }): Promise<unknown>
     },
 
     text: string
@@ -69,10 +80,10 @@ async function sendLongReply(
 
     if (chunks.length === 0) chunks.push('Модель не вернула текст.')
 
-    await interaction.editReply(chunks[0])
+    await interaction.editReply({ content: chunks[0], allowedMentions: { parse: [] } })
 
     for (const chunk of chunks.slice(1)) {
-        await interaction.followUp(chunk)
+        await interaction.followUp({ content: chunk, allowedMentions: { parse: [] } })
     }
 }
 

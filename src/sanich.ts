@@ -1,4 +1,4 @@
-import { Client, Events, MessageFlags, type ChatInputCommandInteraction, type Collection, type Message } from 'discord.js'
+import { Client, Events, MessageFlags, type ChatInputCommandInteraction, type Collection, type Message, type PartialMessage } from 'discord.js'
 
 export const SANICH_ROLE_ID = '1278077913899597936'
 export const SANICH_EMOJI_NAME = 'sanich'
@@ -54,7 +54,8 @@ export function startSanich(client: Client): void {
     client.on(Events.MessageUpdate, (oldMessage, newMessage) => replySanich(newMessage, oldMessage.embeds))
 }
 
-async function replySanich(message: Message, previousEmbeds: readonly SanichEmbed[]): Promise<void> {
+async function replySanich(message: Message | PartialMessage, previousEmbeds: readonly SanichEmbed[]): Promise<void> {
+    if (message.partial) return
     if (!shouldReplySanich(message, previousEmbeds)) return
 
     const emoji = sanichEmojiText(message.guild)
