@@ -7,6 +7,7 @@ import { replySan, startSanich } from './sanich.js'
 import { getServerEmojis } from './server-emojis.js'
 import { FloodChat, answerGate, answerError } from './flood-chat.js'
 import { FLOOD_CHANNEL_ID } from './conversation-memory.js'
+import { replyPlay } from './play.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -34,6 +35,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === 'san') {
         await replySan(interaction).catch((error) => console.error('[sanich] не удалось ответить на /san:', error))
+        return
+    }
+
+    if (interaction.commandName === 'play') {
+        await replyPlay(interaction).catch((error) => console.error('[play] не удалось ответить на /play:', error))
         return
     }
 

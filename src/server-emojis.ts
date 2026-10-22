@@ -25,7 +25,7 @@ export async function getServerEmojis(guild: Guild | null): Promise<ServerEmoji[
         .map((emoji) => ({ id: emoji.id, name: emoji.name!, animated: emoji.animated }))
 }
 
-function emojiCode(emoji: ServerEmoji): string {
+export function emojiCode(emoji: ServerEmoji): string {
     return `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>`
 }
 

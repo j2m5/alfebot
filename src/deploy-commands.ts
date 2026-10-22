@@ -22,6 +22,11 @@ const commands = [
         .setName('san')
         .setDescription('Send :sanich: to the chat')
         .setContexts(InteractionContextType.Guild)
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('play')
+        .setDescription('Слот-машина с эмодзи сервера: собери три одинаковых')
+        .setContexts(InteractionContextType.Guild)
         .toJSON()
 ]
 
