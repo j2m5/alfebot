@@ -4,6 +4,9 @@ import { dirname } from 'node:path'
 
 export const FLOOD_CHANNEL_ID = '1242896006937579522'
 const RETENTION_MS = 7 * 86_400_000
+const RESET_COOLDOWN_MS = 30 * 60_000
+
+type ResetResult = { reset: true; removed: number; nextAllowedAt: number } | { reset: false; nextAllowedAt: number }
 
 export type ConversationTurn = { role: 'user' | 'assistant'; content: string }
 export type RememberedMessage = {
@@ -35,11 +38,42 @@ export class ConversationMemory {
             CREATE INDEX IF NOT EXISTS messages_time ON messages(createdAt);
             CREATE INDEX IF NOT EXISTS messages_parent ON messages(parentId);
             CREATE INDEX IF NOT EXISTS messages_owner ON messages(ownerId, createdAt);
+            CREATE TABLE IF NOT EXISTS memory_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1), resetAt INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO memory_state (id, resetAt) VALUES (1, 0);
         `)
     }
 
+    get resetAt(): number {
+        return Number(this.db.prepare('SELECT resetAt FROM memory_state WHERE id=1').get()!.resetAt)
+    }
+
+    reset(now = Date.now()): ResetResult {
+        // Очистка, граница истории и общий cooldown записываются одной транзакцией.
+        this.db.exec('BEGIN IMMEDIATE')
+        try {
+            const previous = this.resetAt
+            if (previous > 0 && now < previous + RESET_COOLDOWN_MS) {
+                this.db.exec('ROLLBACK')
+                return { reset: false, nextAllowedAt: previous + RESET_COOLDOWN_MS }
+            }
+            const removed = Number(this.db.prepare('DELETE FROM messages').run().changes)
+            this.db.prepare('UPDATE memory_state SET resetAt=? WHERE id=1').run(now)
+            this.db.exec('COMMIT')
+            return { reset: true, removed, nextAllowedAt: now + RESET_COOLDOWN_MS }
+        } catch (error) {
+            this.db.exec('ROLLBACK')
+            throw error
+        }
+    }
+
+    private earliest(now: number): number {
+        return Math.max(now - RETENTION_MS, this.resetAt + 1)
+    }
+
     remember(message: RememberedMessage, now = Date.now()): void {
-        if (message.channelId !== FLOOD_CHANNEL_ID || message.createdAt < now - RETENTION_MS) return
+        if (message.channelId !== FLOOD_CHANNEL_ID || message.createdAt < this.earliest(now)) return
         if (!message.content.trim()) {
             this.remove(message.id)
             return
@@ -55,13 +89,13 @@ export class ConversationMemory {
 
     get(id: string, now = Date.now()): RememberedMessage | undefined {
         return this.db.prepare('SELECT * FROM messages WHERE id=? AND channelId=? AND createdAt>=?')
-            .get(id, FLOOD_CHANNEL_ID, now - RETENTION_MS) as RememberedMessage | undefined
+            .get(id, FLOOD_CHANNEL_ID, this.earliest(now)) as RememberedMessage | undefined
     }
 
     latestReply(ownerId: string, now = Date.now()): RememberedMessage | undefined {
         return this.db.prepare(`SELECT * FROM messages WHERE channelId=? AND ownerId=?
             AND role='assistant' AND createdAt>=? ORDER BY createdAt DESC, id DESC LIMIT 1`)
-            .get(FLOOD_CHANNEL_ID, ownerId, now - 30 * 60_000) as RememberedMessage | undefined
+            .get(FLOOD_CHANNEL_ID, ownerId, Math.max(now - 30 * 60_000, this.earliest(now))) as RememberedMessage | undefined
     }
 
     remove(id: string): void {
@@ -76,7 +110,7 @@ export class ConversationMemory {
     prune(now = Date.now()): void {
         this.db.prepare('DELETE FROM messages WHERE createdAt<?').run(now - RETENTION_MS)
         this.db.exec(`DELETE FROM messages WHERE id IN (
-            SELECT id FROM messages ORDER BY createdAt DESC, id DESC LIMIT -1 OFFSET 5000
+            SELECT id FROM messages ORDER BY createdAt DESC, id DESC LIMIT -1 OFFSET 500
         )`)
     }
 
@@ -98,7 +132,7 @@ export class ConversationMemory {
         }
         const recent = this.db.prepare(`SELECT * FROM messages WHERE channelId=? AND createdAt>=?
             ORDER BY createdAt DESC, id DESC LIMIT 30`)
-            .all(channelId, now - RETENTION_MS) as RememberedMessage[]
+            .all(channelId, this.earliest(now)) as RememberedMessage[]
         const background: string[] = []
         let size = 0
         for (const entry of recent) {

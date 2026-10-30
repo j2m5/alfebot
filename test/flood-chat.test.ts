@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { isFloodTrigger, AnswerGate, FloodChat } from '../src/flood-chat.js'
 import { FLOOD_CHANNEL_ID, ConversationMemory } from '../src/conversation-memory.js'
 import type { Client, Message, ChatInputCommandInteraction } from 'discord.js'
-import { Collection } from 'discord.js'
+import { Collection, MessageFlags, PermissionFlagsBits, Routes } from 'discord.js'
 import { EventEmitter } from 'node:events'
 
 const base = { channelId: FLOOD_CHANNEL_ID, author: { bot: false }, webhookId: null, content: 'привет', system: false }
@@ -39,7 +39,7 @@ test('занятый бот не ставит второе обращение в
 function setup(t: any) {
     const memory = new ConversationMemory(':memory:')
     t.after(() => memory.close())
-    const client = { user: { id: '123' } } as Client
+    const client = { user: { id: '123' }, channels: { fetch: async () => ({ guildId: 'guild' }) } } as unknown as Client
     const chat = new FloodChat(client, memory)
     const sent: any[] = []
     let sequence = 0
@@ -54,7 +54,24 @@ function setup(t: any) {
             }, ...extra
         } as unknown as Message
     }
-    return { chat, memory, sent, message }
+    return { chat, memory, sent, message, client }
+}
+
+function resetInteraction(userId = 'alice', guildId: string | null = 'guild') {
+    const sent: any[] = []
+    const interaction = {
+        guildId, channelId: 'another-channel', user: { id: userId }, memberPermissions: { has: () => false },
+        deferReply: async (options: any) => sent.push({ kind: 'defer', ...options }),
+        editReply: async (options: any) => sent.push({ kind: 'edit', ...options }),
+        reply: async (options: any) => sent.push({ kind: 'reply', ...options })
+    } as unknown as ChatInputCommandInteraction
+    return { interaction, sent }
+}
+
+function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((done) => { resolve = done })
+    return { promise, resolve }
 }
 
 test('обычный чат записывается без модели; упоминание и reply получают фон и ветку', async (t) => {
@@ -81,6 +98,62 @@ test('обычный чат записывается без модели; упо
     assert.ok(requests[1].at(-1).content.includes('Боб'))
     assert.equal(memory.get('answer-2')?.parentId, 'followup')
     assert.equal(memory.get('followup')?.parentId, 'answer-1')
+})
+
+function serverGuild() {
+    const members = [{ user: { id: '200', username: 'User', global_name: 'Капитан' }, roles: ['900'] }]
+    const roles = [
+        { id: '100', name: '@everyone', position: 0, permissions: '0' },
+        { id: '900', name: 'Командир', position: 1, permissions: String(PermissionFlagsBits.ManageRoles) }
+    ]
+    const guild = { id: '100', name: 'Наш сервер', ownerId: '200', memberCount: 1,
+        emojis: { fetch: async () => new Collection() },
+        client: { rest: { get: async (route: string) => route === Routes.guildRoles('100') ? roles : members } }
+    }
+    return { guild, members, roles }
+}
+
+test('диалог получает свежий справочник после истории, справочник не накапливается в SQLite', async (t) => {
+    const { chat, memory, message } = setup(t)
+    const { guild, roles } = serverGuild()
+    const requests: any[][] = []
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        requests.push(JSON.parse(String(options.body)).messages)
+        return Response.json({ message: { content: 'Роль найдена.' }, done: true })
+    })
+    await chat.onMessage(message('background', 'Раньше роль называлась Страж'))
+    await chat.onMessage(message('question', '<@123> Какие права у Командира?', { guild }))
+    const context = requests[0].at(-2).content
+    assert.ok(context.startsWith('Актуальный справочник сервера Discord'))
+    assert.ok(context.includes('Командир') && context.includes('ManageRoles') && context.includes('Капитан'))
+    assert.ok(requests[0].at(-1).content.includes('Какие права'))
+    assert.ok(requests[0].some(m => m.content.includes('Раньше роль называлась Страж')))
+    roles[1].name = 'Новый командир'
+    await chat.onMessage(message('followup', '<@123> А сейчас?', { guild }))
+    assert.ok(requests[1].at(-2).content.includes('Новый командир'))
+    const saved = memory.context(FLOOD_CHANNEL_ID, 'unused', 'answer-2')
+    assert.ok(!JSON.stringify(saved).includes('Актуальный справочник сервера Discord'))
+})
+
+test('сброс во время чтения Discord отменяет справочник и не запускает модель', { timeout: 2000 }, async (t) => {
+    const { chat, sent, message } = setup(t)
+    const { guild } = serverGuild()
+    const started = deferred<void>()
+    let signal: AbortSignal | undefined
+    t.mock.method(guild.client.rest, 'get', async (_route, options: any) => {
+        signal = options.signal
+        started.resolve()
+        return new Promise(() => {})
+    })
+    let modelCalls = 0
+    t.mock.method(globalThis, 'fetch', async () => { modelCalls++; throw new Error('Unexpected model request') })
+    const pending = chat.onMessage(message('question', '<@123> Кто на сервере?', { guild }))
+    await started.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    await pending
+    assert.equal(signal?.aborted, true)
+    assert.equal(modelCalls, 0)
+    assert.equal(sent.length, 0)
 })
 
 test('другие каналы и боты не записываются и не вызывают модель', async (t) => {
@@ -114,6 +187,7 @@ test('ответ из одного выдуманного эмодзи не ос
 
 test('slash-вопрос сохраняется вместе с ответом; второй ask продолжает цепочку', async (t) => {
     const { chat, memory, message } = setup(t)
+    const { guild } = serverGuild()
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)).messages)
@@ -122,7 +196,7 @@ test('slash-вопрос сохраняется вместе с ответом; 
     function interaction(id: string): ChatInputCommandInteraction {
         return {
             id, channelId: FLOOD_CHANNEL_ID, createdTimestamp: Date.now(),
-            user: { id: 'alice', username: 'Алиса' }, guild: null, deferred: true,
+            user: { id: 'alice', username: 'Алиса' }, guild, deferred: true,
             deferReply: async () => {},
             editReply: async (options: any) => {
                 assert.deepEqual(options.allowedMentions, { parse: [], repliedUser: false })
@@ -135,6 +209,8 @@ test('slash-вопрос сохраняется вместе с ответом; 
     assert.equal(memory.get('ask:2')?.parentId, 'slash-answer-1')
     assert.ok(requests[1].some((m: any) => m.role === 'assistant' && m.content === 'Кабачок'))
     assert.ok(requests[1].some((m: any) => m.content.includes('Наш корабль называется Кабачок')))
+    assert.ok(requests.every((messages: any[]) => messages.at(-2).content.includes('Актуальный справочник сервера Discord')))
+    assert.equal(JSON.parse(requests[1].at(-1).content).userId, 'alice')
 })
 
 test('при запуске подхватывается только нужный канал без вызовов модели и ответов', async (t) => {
@@ -171,5 +247,232 @@ test('события редактирования и удаления обнов
     assert.equal(memory.get('original')?.content, 'Новое')
     client.emit('messageDelete', { channelId: FLOOD_CHANNEL_ID, id: 'original' })
     assert.equal(memory.get('original'), undefined)
+    memory.reset(Date.now() + 1)
+    client.emit('messageUpdate', {}, { channelId: FLOOD_CHANNEL_ID, partial: true,
+        fetch: async () => message('original', 'Не возвращать после сброса', { createdTimestamp: memory.resetAt - 1 }) })
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(memory.get('original'), undefined)
     client.removeAllListeners()
+})
+
+test('/reset доступна обычному участнику; общий cooldown действует и для другого пользователя', async (t) => {
+    const { chat, memory, message } = setup(t)
+    let time = Date.now()
+    t.mock.method(Date, 'now', () => time)
+    await chat.onMessage(message('old', 'Старая переписка'))
+    const first = resetInteraction()
+    await chat.resetMemory(first.interaction)
+    assert.equal(memory.count(), 0)
+    assert.match(first.sent.at(-1).content, /память.*сброшена/i)
+    assert.equal(first.sent[0].flags, MessageFlags.Ephemeral)
+    time++
+    await chat.onMessage(message('new', 'Новая переписка'))
+    const second = resetInteraction('bob')
+    await chat.resetMemory(second.interaction)
+    assert.ok(memory.get('new'))
+    assert.match(second.sent.at(-1).content, /<t:\d+:R>/)
+    assert.equal(second.sent[0].flags, MessageFlags.Ephemeral)
+})
+
+test('сброс из другого сервера или лички не затрагивает память флудилки и её cooldown', async (t) => {
+    const { chat, memory, message } = setup(t)
+    await chat.onMessage(message('old', 'Разговор своего сервера'))
+    for (const guildId of ['unrelated', null]) {
+        await chat.resetMemory(resetInteraction('alice', guildId).interaction)
+        assert.ok(memory.get('old'))
+        assert.equal(memory.resetAt, 0)
+    }
+})
+
+test('после сброса bootstrap не возвращает старые сообщения, но принимает свежие', async (t) => {
+    const { memory, message } = setup(t)
+    const time = Date.now()
+    memory.reset(time)
+    const client = { user: { id: '123' }, channels: { fetch: async () => ({
+        isTextBased: () => true,
+        messages: { fetch: async () => new Collection([
+            ['old', message('old', 'Забытая переписка', { createdTimestamp: time - 1 })],
+            ['new', message('new', 'Новая переписка', { createdTimestamp: time + 1 })]
+        ]) }
+    }) } } as unknown as Client
+    await new FloodChat(client, memory).bootstrap()
+    assert.equal(memory.get('old'), undefined)
+    assert.ok(memory.get('new'))
+    assert.equal(memory.count(), 1)
+})
+
+test('reply на старый ответ после reset запускает новый разговор без старого текста', async (t) => {
+    const { chat, memory, sent, message } = setup(t)
+    let time = Date.now()
+    t.mock.method(Date, 'now', () => time)
+    const old = message('old', 'Секретная старая история', { author: { id: '123', bot: true, username: 'Алфе' } })
+    await chat.resetMemory(resetInteraction().interaction)
+    time++
+    const requests: any[] = []
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        requests.push(JSON.parse(String(options.body)).messages)
+        return Response.json({ message: { content: 'Начинаем заново' }, done: true })
+    })
+    await chat.onMessage(message('fresh', 'Привет!', {
+        reference: { messageId: 'old', channelId: FLOOD_CHANNEL_ID },
+        channel: { messages: { fetch: async () => old }, sendTyping: async () => {} }
+    }))
+    assert.equal(requests.length, 1)
+    assert.ok(!JSON.stringify(requests).includes('Секретная старая история'))
+    assert.equal(memory.get('old'), undefined)
+    assert.equal(sent[0].content, 'Начинаем заново')
+})
+
+test('reset отменяет текущую генерацию и освобождает бота; поздний старый ответ не отправляется', async (t) => {
+    const { chat, memory, sent, message } = setup(t)
+    let time = Date.now()
+    t.mock.method(Date, 'now', () => time)
+    const started = deferred<void>()
+    const oldResponse = deferred<Response>()
+    let oldSignal!: AbortSignal
+    let requests = 0
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        if (++requests === 1) {
+            oldSignal = options.signal
+            started.resolve()
+            return oldResponse.promise
+        }
+        assert.ok(!String(options.body).includes('Старый вопрос'))
+        return Response.json({ message: { content: 'Новый ответ' }, done: true })
+    })
+    const oldTask = chat.onMessage(message('old', '<@123> Старый вопрос'))
+    await started.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    const aborted = oldSignal.aborted
+    time++
+    await chat.onMessage(message('new', '<@123> Новый вопрос'))
+    oldResponse.resolve(Response.json({ message: { content: 'Забытый ответ' }, done: true }))
+    await oldTask
+    assert.equal(aborted, true)
+    assert.deepEqual(sent.map((reply) => reply.content), ['Новый ответ'])
+    assert.ok(!JSON.stringify(memory.context(FLOOD_CHANNEL_ID, 'next', null)).includes('Забытый ответ'))
+})
+
+test('сброс во время /ask удаляет ожидание, не публикует старый ответ и не возвращает его в SQLite', async (t) => {
+    const { chat, memory } = setup(t)
+    const started = deferred<void>()
+    const response = deferred<Response>()
+    const sent: any[] = []
+    let deleted = 0
+    let signal!: AbortSignal
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        signal = options.signal
+        started.resolve()
+        return response.promise
+    })
+    const interaction = {
+        id: 'old-ask', channelId: FLOOD_CHANNEL_ID, createdTimestamp: Date.now(),
+        user: { id: 'alice', username: 'Алиса' }, guild: null, deferred: true,
+        deferReply: async () => {}, editReply: async (options: any) => sent.push(options),
+        followUp: async (options: any) => sent.push(options), deleteReply: async () => { deleted++ }
+    } as unknown as ChatInputCommandInteraction
+    const task = chat.answerSlash(interaction, 'Старый вопрос')
+    await started.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    response.resolve(Response.json({ message: { content: 'Забытый ответ' }, done: true }))
+    await task
+    assert.equal(signal.aborted, true)
+    assert.equal(sent.length, 0)
+    assert.equal(deleted, 1)
+    assert.equal(memory.count(), 0)
+})
+
+test('если сброс произошёл во время отправки ответа в Discord, позднее сообщение удаляется', async (t) => {
+    const { chat, memory, message } = setup(t)
+    const sending = deferred<void>()
+    const sentResponse = deferred<Message>()
+    let deleted = 0
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ message: { content: 'Старый ответ' }, done: true }))
+    const task = chat.onMessage(message('question', '<@123> Вопрос', { reply: async () => {
+        sending.resolve()
+        return sentResponse.promise
+    } }))
+    await sending.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    sentResponse.resolve(message('late-answer', 'Старый ответ', {
+        author: { id: '123', bot: true, username: 'Алфе' }, delete: async () => { deleted++ }
+    }))
+    await task
+    assert.equal(deleted, 1)
+    assert.equal(memory.count(), 0)
+})
+
+test('отклонённый повторный /reset не отменяет ответ на новый вопрос', async (t) => {
+    const { chat, message, sent } = setup(t)
+    let time = Date.now()
+    t.mock.method(Date, 'now', () => time)
+    await chat.resetMemory(resetInteraction().interaction)
+    time++
+    const started = deferred<void>()
+    const response = deferred<Response>()
+    let signal!: AbortSignal
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        signal = options.signal
+        started.resolve()
+        return response.promise
+    })
+    const task = chat.onMessage(message('new-question', '<@123> Новый вопрос'))
+    await started.promise
+    await chat.resetMemory(resetInteraction('bob').interaction)
+    const aborted = signal.aborted
+    response.resolve(Response.json({ message: { content: 'Новый ответ' }, done: true }))
+    await task
+    assert.equal(aborted, false)
+    assert.deepEqual(sent.map((entry) => entry.content), ['Новый ответ'])
+})
+
+test('reset во время deferReply не даёт старому /ask начать генерацию после подтверждения Discord', async (t) => {
+    const { chat, memory } = setup(t)
+    const starting = deferred<void>()
+    const acknowledged = deferred<void>()
+    let deleted = 0
+    let requests = 0
+    t.mock.method(globalThis, 'fetch', async () => {
+        requests++
+        return Response.json({ message: { content: 'Старый ответ' }, done: true })
+    })
+    const interaction = {
+        id: 'delayed-ask', channelId: FLOOD_CHANNEL_ID, createdTimestamp: Date.now(),
+        user: { id: 'alice', username: 'Алиса' }, guild: null, deferred: false,
+        deferReply: async () => {
+            starting.resolve()
+            await acknowledged.promise
+            interaction.deferred = true
+        },
+        editReply: async () => {}, deleteReply: async () => { deleted++ }
+    }
+    const task = chat.answerSlash(interaction as unknown as ChatInputCommandInteraction, 'Старый вопрос')
+    await starting.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    acknowledged.resolve()
+    await task
+    assert.equal(requests, 0)
+    assert.equal(memory.count(), 0)
+    assert.equal(deleted, 1)
+})
+
+test('сообщение об ошибке модели тоже удаляется, если reset пришёл во время его отправки', async (t) => {
+    const { chat, memory, message } = setup(t)
+    const sending = deferred<void>()
+    const response = deferred<Message>()
+    let deleted = 0
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Model unavailable') })
+    t.mock.method(console, 'error', () => {})
+    const task = chat.onMessage(message('question', '<@123> Вопрос', { reply: async () => {
+        sending.resolve()
+        return response.promise
+    } }))
+    await sending.promise
+    await chat.resetMemory(resetInteraction().interaction)
+    response.resolve(message('late-error', 'Ошибка модели', {
+        author: { id: '123', bot: true, username: 'Алфе' }, delete: async () => { deleted++ }
+    }))
+    await task
+    assert.equal(deleted, 1)
+    assert.equal(memory.count(), 0)
 })

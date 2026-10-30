@@ -27,6 +27,11 @@ const commands = [
         .setName('play')
         .setDescription('Слот-машина с эмодзи сервера: собери три одинаковых')
         .setContexts(InteractionContextType.Guild)
+        .toJSON(),
+    new SlashCommandBuilder()
+        .setName('reset')
+        .setDescription('Сбросить память флудилки — один раз в 30 минут для всех')
+        .setContexts(InteractionContextType.Guild)
         .toJSON()
 ]
 

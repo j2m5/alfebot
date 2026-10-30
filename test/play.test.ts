@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Collection, MessageFlags, type ChatInputCommandInteraction } from 'discord.js'
-import { replyPlay, rollSlots, slotComment } from '../src/play.js'
+import { replyPlay, rollSlots } from '../src/play.js'
 import type { ServerEmoji } from '../src/server-emojis.js'
 
 const emojis: ServerEmoji[] = [
@@ -89,27 +89,32 @@ function playInteraction(pool: ServerEmoji[] = emojis) {
 }
 
 test('первое сообщение содержит только 3 серверных эмодзи, второе — комментарий именно к их результату', async (t) => {
-    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Неожиданный запрос к модели') })
     const { interaction, sent } = playInteraction()
+    let modelRequest: any
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        assert.deepEqual(sent.map((entry) => entry.method), ['defer', 'edit'])
+        modelRequest = JSON.parse(JSON.parse(String(options.body)).messages.at(-1).content)
+        return Response.json({ message: { content: 'Кафедра случайных процессов изучает этот результат.' }, done: true })
+    })
     await replyPlay(interaction)
     assert.deepEqual(sent.map((entry) => entry.method), ['defer', 'edit', 'followUp'])
     assert.match(sent[1].content, /^<a?:\w+:\d+> <a?:\w+:\d+> <a?:\w+:\d+>$/)
     const codes = sent[1].content.split(' ')
     for (const code of codes) assert.ok(['<:sanich:111>', '<a:dance:222>', '<:kek:333>', '<:hmm:444>'].includes(code))
-    assert.match(sent[2].content, { 1: /Победа!/, 2: /Пара!/, 3: /Без совпадений\./ }[new Set(codes).size]!)
+    assert.deepEqual(modelRequest.emojis, codes)
+    assert.equal(modelRequest.outcome, { 1: 'jackpot', 2: 'pair', 3: 'miss' }[new Set(codes).size])
+    assert.equal(sent[2].content, 'Кафедра случайных процессов изучает этот результат.')
     for (const message of sent.slice(1)) assert.deepEqual(message.allowedMentions, { parse: [] })
 })
 
-test('комментарии различаются внутри каждого исхода, не добавляют Unicode-эмодзи и помещаются в одно сообщение', () => {
-    for (const [outcome, label] of [['jackpot', /Победа!/], ['pair', /Пара!/], ['miss', /Без совпадений\./]] as const) {
-        const comments = [0, 1, 2].map((pick) => slotComment(outcome, (max) => pick % max))
-        assert.equal(new Set(comments).size, 3)
-        for (const comment of comments) {
-            assert.match(comment, label)
-            assert.ok(comment.length > 30 && comment.length <= 2000)
-            assert.doesNotMatch(comment, /\p{Extended_Pictographic}/u)
-        }
-    }
+test('ошибка модели оставляет результат игры и отправляет понятное второе сообщение', async (t) => {
+    const { interaction, sent } = playInteraction()
+    t.mock.method(globalThis, 'fetch', async () => { throw new Error('Model unavailable') })
+    t.mock.method(console, 'error', () => {})
+    await replyPlay(interaction)
+    assert.deepEqual(sent.map((entry) => entry.method), ['defer', 'edit', 'followUp'])
+    assert.match(sent[1].content, /^<a?:\w+:\d+> <a?:\w+:\d+> <a?:\w+:\d+>$/)
+    assert.match(sent[2].content, /комментар|модел/i)
 })
 
 test('команда недоступна в личных сообщениях и не запускает розыгрыш', async () => {

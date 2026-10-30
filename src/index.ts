@@ -5,6 +5,7 @@ import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
 import { replySan, startSanich } from './sanich.js'
 import { getServerEmojis } from './server-emojis.js'
+import { getServerContext } from './server-context.js'
 import { FloodChat, answerGate, answerError } from './flood-chat.js'
 import { FLOOD_CHANNEL_ID } from './conversation-memory.js'
 import { replyPlay } from './play.js'
@@ -43,6 +44,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return
     }
 
+    if (interaction.commandName === 'reset') {
+        await floodChat.resetMemory(interaction).catch((error) => console.error('[chat] ошибка /reset:', error))
+        return
+    }
+
     if (interaction.commandName !== 'ask') return
 
     const prompt = interaction.options.getString('prompt', true)
@@ -60,8 +66,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
         await interaction.deferReply()
 
-        const emojis = await getServerEmojis(interaction.guild)
-        const answer = await askOllama(prompt, emojis, deadline)
+        const [emojis, serverContext] = await Promise.all([
+            getServerEmojis(interaction.guild), getServerContext(interaction.guild, deadline)
+        ])
+        const answer = await askOllama(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
+            userId: interaction.user.id, text: prompt }), emojis, deadline, serverContext ? [serverContext] : [])
 
         await sendLongReply(interaction, answer)
     } catch (error) {
