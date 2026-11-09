@@ -5,6 +5,7 @@ import { FLOOD_CHANNEL_ID, ConversationMemory } from '../src/conversation-memory
 import type { Client, Message, ChatInputCommandInteraction } from 'discord.js'
 import { Collection, MessageFlags, PermissionFlagsBits, Routes } from 'discord.js'
 import { EventEmitter } from 'node:events'
+import { ReminderStore } from '../src/reminder-store.js'
 
 const base = { channelId: FLOOD_CHANNEL_ID, author: { bot: false }, webhookId: null, content: 'привет', system: false }
 
@@ -67,6 +68,17 @@ function resetInteraction(userId = 'alice', guildId: string | null = 'guild') {
     } as unknown as ChatInputCommandInteraction
     return { interaction, sent }
 }
+
+test('reset conversation memory preserves scheduled reminders', async t => {
+    const { memory, client } = setup(t)
+    const reminders = new ReminderStore(':memory:'); t.after(() => reminders.close())
+    const guildId = '111111111111111111', userId = '222222222222222222'
+    reminders.schedule({ guildId, userId, channelId: FLOOD_CHANNEL_ID, requestId: '333333333333333333',
+        text: 'Проверить загрузку', dueAt: Date.now() + 60000 })
+    await new FloodChat(client, memory, undefined, reminders).resetMemory(resetInteraction().interaction)
+    assert.ok(memory.resetAt > 0)
+    assert.equal(reminders.list(guildId, userId).length, 1)
+})
 
 function deferred<T>() {
     let resolve!: (value: T) => void
@@ -173,6 +185,114 @@ test('удаление вопроса во время генерации пре�
     })
     await chat.onMessage(message('question', '<@123> ответь'))
     assert.equal(sent.length, 0)
+})
+
+test('событие удаления исходного вопроса отменяет выполняющийся запрос', { timeout: 2000 }, async (t) => {
+    const { memory, message, sent } = setup(t)
+    const client = Object.assign(new EventEmitter(), { user: { id: '123' } })
+    t.after(() => client.removeAllListeners())
+    const chat = new FloodChat(client as unknown as Client, memory)
+    chat.start()
+    const started = deferred<void>()
+    let requestSignal: AbortSignal | undefined
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        requestSignal = options.signal
+        started.resolve()
+        return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+    })
+    const task = chat.onMessage(message('question', '<@123> Сделай действие'))
+    await started.promise
+    client.emit('messageDelete', { channelId: FLOOD_CHANNEL_ID, id: 'question' })
+    // Проверяем отмену до ожидания задачи, иначе регрессия зависнет на таймауте.
+    assert.equal(requestSignal?.aborted, true)
+    await task
+    assert.equal(sent.length, 0)
+})
+
+test('изменение текста исходного запроса отзывает действие; обновление превью его не отменяет', { timeout: 2000 }, async (t) => {
+    const { memory, message, sent } = setup(t)
+    const client = Object.assign(new EventEmitter(), { user: { id: '123' } })
+    t.after(() => client.removeAllListeners())
+    const chat = new FloodChat(client as unknown as Client, memory)
+    chat.start()
+    const started = deferred<void>()
+    let requestSignal: AbortSignal | undefined
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        requestSignal = options.signal
+        started.resolve()
+        return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+    })
+    const task = chat.onMessage(message('question', '<@123> Поставь таймаут'))
+    await started.promise
+    client.emit('messageUpdate', {}, message('question', '<@123> Поставь таймаут'))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(requestSignal?.aborted, false)
+    client.emit('messageUpdate', {}, message('question', 'Передумал, не делай'))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(requestSignal?.aborted, true)
+    await task
+    assert.equal(sent.length, 0)
+})
+
+test('удаление или изменение запроса во время загрузки reply не запускает модель', { timeout: 2000 }, async (t) => {
+    for (const action of ['delete', 'edit']) {
+        const { memory, message, sent } = setup(t)
+        const client = Object.assign(new EventEmitter(), { user: { id: '123' } })
+        t.after(() => client.removeAllListeners())
+        const chat = new FloodChat(client as unknown as Client, memory)
+        chat.start()
+        const loading = deferred<Message | null>()
+        let modelCalls = 0
+        const mock = t.mock.method(globalThis, 'fetch', async () => {
+            modelCalls++
+            return Response.json({ message: { content: 'Готово.' }, done: true })
+        })
+        const task = chat.onMessage(message('question', '<@123> поставь таймаут @участник на 5 минут', {
+            reference: { messageId: 'uncached', channelId: FLOOD_CHANNEL_ID },
+            channel: { messages: { fetch: () => loading.promise } }
+        }))
+        if (action === 'delete') client.emit('messageDelete', { channelId: FLOOD_CHANNEL_ID, id: 'question' })
+        else client.emit('messageUpdate', {}, message('question', 'Передумал'))
+        loading.resolve(null)
+        await task
+        assert.equal(modelCalls, 0, action)
+        assert.equal(sent.length, 0, action)
+        mock.mock.restore()
+    }
+})
+
+test('reset во время авторизации MCP не даёт инструменту выполнить изменение', { timeout: 3000 }, async (t) => {
+    const { memory, message, sent } = setup(t)
+    const guildId = '111111111111111111', botId = '222222222222222222'
+    const actorId = '333333333333333333', targetId = '444444444444444444'
+    const started = deferred<void>()
+    let writes = 0
+    let toolSignal: AbortSignal | undefined
+    const rest = { get: async (_route: string, options: any) => {
+        toolSignal = options.signal
+        started.resolve()
+        return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }))
+    }, patch: async () => { writes++ }, put: async () => { writes++ }, delete: async () => { writes++ }, post: async () => { writes++ } }
+    const guild = { id: guildId, name: 'Наш сервер', ownerId: actorId, memberCount: 1,
+        emojis: { fetch: async () => new Collection() },
+        client: { rest: { get: async (route: string) => route.endsWith('/roles')
+            ? [{ id: guildId, name: '@everyone', position: 0, permissions: '0' }]
+            : [{ user: { id: actorId, username: 'Алиса' }, roles: [] }] } } }
+    const client = { user: { id: botId }, channels: { fetch: async () => ({ guildId }) } } as unknown as Client
+    const chat = new FloodChat(client, memory, rest as any)
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ message: {
+        tool_calls: [{ function: { name: 'set_timeout', arguments: { userId: targetId, minutes: 5 } } }]
+    }, done: true }))
+    const task = chat.onMessage(message('777777777777777777', `<@${botId}> поставь таймаут <@${targetId}> на 5 минут`, {
+        guild, author: { id: actorId, username: 'Алиса', bot: false }
+    }))
+    await started.promise
+    await chat.resetMemory(resetInteraction(actorId, guildId).interaction)
+    await task
+    assert.equal(toolSignal?.aborted, true)
+    assert.equal(writes, 0)
+    assert.equal(sent.length, 0)
+    assert.equal(memory.count(), 0)
 })
 
 test('ответ из одного выдуманного эмодзи не оставляет обращение без сообщения', async (t) => {

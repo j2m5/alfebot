@@ -4,11 +4,12 @@ import { askOllama } from './ollama.js'
 import { getServerEmojis } from './server-emojis.js'
 import { getServerContext } from './server-context.js'
 import { splitText } from './text.js'
+import type { DiscordToolContext } from './tool-types.js'
 
 const NO_MENTIONS = { parse: [] as never[], repliedUser: false }
 const BUSY = 'Сейчас отвечаю на другой вопрос. Повтори обращение через несколько секунд.'
 
-type PendingAnswer = { signal: AbortSignal; current(): boolean; finish(): void; cancel(): void }
+type PendingAnswer = { signal: AbortSignal; sourceMessageId?: string; current(): boolean; finish(): void; cancel(): void }
 
 export class AnswerGate {
     private token: symbol | null = null
@@ -47,16 +48,19 @@ async function within<T>(promise: Promise<T>, fallback: T, milliseconds = 1500):
 export class FloodChat {
     private pending: PendingAnswer | null = null
 
-    constructor(private client: Client, readonly memory = new ConversationMemory()) {}
+    constructor(private client: Client, readonly memory = new ConversationMemory(),
+        private readonly toolRest?: DiscordToolContext['rest'],
+        private readonly reminders?: DiscordToolContext['reminders']) {}
 
-    private beginAnswer(deadline: AbortSignal): PendingAnswer | null {
+    private beginAnswer(deadline: AbortSignal, sourceMessageId?: string): PendingAnswer | null {
         const release = answerGate.acquire()
         if (!release) return null
         const controller = new AbortController()
         const revision = this.memory.resetAt
         const pending: PendingAnswer = {
             signal: AbortSignal.any([deadline, controller.signal]),
-            current: () => this.memory.resetAt === revision,
+            sourceMessageId,
+            current: () => this.memory.resetAt === revision && !controller.signal.aborted,
             finish: () => {
                 release()
                 if (this.pending === pending) this.pending = null
@@ -113,6 +117,9 @@ export class FloodChat {
             if (message.channelId !== FLOOD_CHANNEL_ID) return
             void (async () => {
                 const full = message.partial ? await message.fetch() : message
+                if (this.pending?.sourceMessageId === full.id && this.memory.get(full.id)?.content !== full.content) {
+                    this.pending.cancel()
+                }
                 this.record(full)
             })().catch((error) => console.error('[chat] не удалось обновить сообщение в памяти:', error))
         })
@@ -125,7 +132,10 @@ export class FloodChat {
     }
 
     private remove(id: string): void {
-        try { this.memory.remove(id) } catch (error) { console.error('[chat] ошибка удаления из памяти:', error) }
+        try {
+            this.memory.remove(id)
+            if (this.pending?.sourceMessageId && !this.memory.get(this.pending.sourceMessageId)) this.pending.cancel()
+        } catch (error) { console.error('[chat] ошибка удаления из памяти:', error) }
     }
 
     async bootstrap(): Promise<void> {
@@ -162,24 +172,29 @@ export class FloodChat {
         const revision = this.memory.resetAt
         this.record(message)
         if (!this.memory.get(message.id)) return
+        const requestText = message.content
         const botId = this.client.user!.id
         const referenceId = message.reference?.channelId === FLOOD_CHANNEL_ID ? message.reference.messageId : undefined
         let parent = referenceId ? this.memory.get(referenceId) : undefined
         let replyToBot = parent?.authorId === botId
-        if (referenceId && !parent) {
-            const referenced = await within(message.channel.messages.fetch(referenceId), null)
-            if (this.memory.resetAt !== revision) return
-            if (referenced) {
-                // Старый ответ может быть адресатом reply, но его текст не возвращается в память.
-                replyToBot = referenced.author.id === botId
-                this.record(referenced)
-                parent = this.memory.get(referenceId)
-            }
-        }
-        if (!isFloodTrigger(message, botId, replyToBot)) return
-        const pending = this.beginAnswer(deadline)
-        if (!pending) { await message.reply({ content: BUSY, allowedMentions: NO_MENTIONS }); return }
+        if (!isFloodTrigger(message, botId, replyToBot) && (!referenceId || parent)) return
+        // Register cancellation before the first await, including an uncached reply lookup.
+        const pending = this.beginAnswer(deadline, message.id)
         try {
+            if (referenceId && !parent) {
+                const referenced = await within(message.channel.messages.fetch(referenceId), null)
+                if (this.memory.resetAt !== revision || this.memory.get(message.id)?.content !== requestText ||
+                    (pending && !pending.current())) return
+                if (referenced) {
+                    // Старый ответ может быть адресатом reply, но его текст не возвращается в память.
+                    replyToBot = referenced.author.id === botId
+                    this.record(referenced)
+                    parent = this.memory.get(referenceId)
+                }
+            }
+            if (!isFloodTrigger({ ...message, content: requestText }, botId, replyToBot)) return
+            if (!pending) { await message.reply({ content: BUSY, allowedMentions: NO_MENTIONS }); return }
+            if (!pending.current() || this.memory.get(message.id)?.content !== requestText) return
             if ('sendTyping' in message.channel) void message.channel.sendTyping().catch(() => {})
             const parentId = parent?.id ?? this.memory.latestReply(message.author.id)?.id ?? null
             // Сохраняем неявное продолжение для последующих reply.
@@ -187,12 +202,16 @@ export class FloodChat {
             if (current) this.memory.remember({ ...current, parentId })
             const history = this.memory.context(message.channelId, message.id, parentId)
             const prompt = JSON.stringify({ author: message.member?.displayName ?? message.author.username,
-                userId: message.author.id, text: message.content.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() || 'Привет!' })
+                userId: message.author.id, messageId: message.id, replyMessageId: referenceId, replyUserId: parent?.authorId,
+                text: requestText.replace(new RegExp(`<@!?${botId}>`, 'g'), '').trim() || 'Привет!' })
             const [emojis, serverContext] = await Promise.all([
                 getServerEmojis(message.guild), getServerContext(message.guild, pending.signal)
             ])
             if (!pending.current()) return
-            const answer = await askOllama(prompt, emojis, pending.signal, serverContext ? [...history, serverContext] : history)
+            const answer = await askOllama(prompt, emojis, pending.signal, serverContext ? [...history, serverContext] : history,
+                'chat', this.toolRest && message.guild ? { rest: this.toolRest, guildId: message.guild.id,
+                    channelId: message.channelId, actorId: message.author.id, botId, requestId: message.id,
+                    requestText, replyMessageId: referenceId, replyUserId: parent?.authorId, reminders: this.reminders } : undefined)
             // Если исходное сообщение удалили за время генерации, не отвечаем на него.
             if (!pending.current() || !this.memory.get(message.id)) return
             let link = message.id
@@ -209,7 +228,7 @@ export class FloodChat {
                 link = sent.id
             }
         } catch (error) {
-            if (!pending.current()) return
+            if (!pending?.current()) return
             console.error('[chat] ошибка ответа:', error)
             if (this.memory.get(message.id)) {
                 const sent = await message.reply({ content: answerError(error), allowedMentions: NO_MENTIONS })
@@ -217,7 +236,7 @@ export class FloodChat {
                     await sent.delete().catch((error) => console.error('[chat] не удалось удалить отменённый ответ:', error))
                 }
             }
-        } finally { pending.finish() }
+        } finally { pending?.finish() }
     }
 
     async answerSlash(interaction: ChatInputCommandInteraction, prompt: string): Promise<void> {
@@ -243,7 +262,10 @@ export class FloodChat {
             ])
             if (!pending.current()) return
             const answer = await askOllama(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
-                userId: interaction.user.id, text: prompt }), emojis, pending.signal, serverContext ? [...history, serverContext] : history)
+                userId: interaction.user.id, text: prompt }), emojis, pending.signal, serverContext ? [...history, serverContext] : history,
+                'chat', this.toolRest && interaction.guild ? { rest: this.toolRest, guildId: interaction.guild.id,
+                    channelId: interaction.channelId, actorId: interaction.user.id, botId: this.client.user!.id,
+                    requestId: interaction.id, requestText: prompt, reminders: this.reminders } : undefined)
             if (!pending.current()) return
             let link = id
             const chunks = splitText(answer)

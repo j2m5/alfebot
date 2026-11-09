@@ -10,12 +10,14 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "deploy": "tsx src/deploy-commands.ts",
-    "test": "tsx --test test/text.test.ts test/rss.test.ts test/state.test.ts test/devtracker.test.ts test/sanich.test.ts test/ollama.test.ts test/conversation-memory.test.ts test/flood-chat.test.ts test/play.test.ts test/server-context.test.ts"
+    "test": "tsx --test test/text.test.ts test/rss.test.ts test/state.test.ts test/devtracker.test.ts test/sanich.test.ts test/ollama.test.ts test/conversation-memory.test.ts test/flood-chat.test.ts test/play.test.ts test/server-context.test.ts test/mcp-tools.test.ts test/ollama-agent.test.ts test/discord-tools.test.ts test/reminder-store.test.ts test/reminder-tools.test.ts test/reminder-scheduler.test.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
-    "fast-xml-parser": "^5.10.1"
+    "fast-xml-parser": "^5.10.1",
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { Client, Events, GatewayIntentBits, Partials, MessageFlags } from 'discord.js'
+import { Client, Events, GatewayIntentBits, Partials, MessageFlags, Routes } from 'discord.js'
 import { askOllama } from './ollama.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
@@ -9,6 +9,11 @@ import { getServerContext } from './server-context.js'
 import { FloodChat, answerGate, answerError } from './flood-chat.js'
 import { FLOOD_CHANNEL_ID } from './conversation-memory.js'
 import { replyPlay } from './play.js'
+import { createToolRest } from './tool-rest.js'
+import { ReminderStore } from './reminder-store.js'
+import { ReminderScheduler, stopReminders } from './reminder-scheduler.js'
+import { createDiscordTools } from './discord-tools.js'
+import { requireReminderAccess } from './reminder-tools.js'
 
 const token = process.env.DISCORD_TOKEN
 
@@ -22,11 +27,43 @@ const client = new Client({
 })
 
 startSanich(client)
-const floodChat = new FloodChat(client)
+// Сетевой сбой или лимит Discord не должен приводить к повтору записи без новой проверки прав.
+const toolRest = createToolRest(token)
+const reminders = new ReminderStore()
+const reminderScheduler = new ReminderScheduler(reminders, {
+    async authorize(reminder, signal) {
+        const context = { rest: toolRest, guildId: reminder.guildId, channelId: reminder.channelId,
+            actorId: reminder.userId, botId: client.user!.id, requestId: reminder.requestId, requestText: '' }
+        await requireReminderAccess(context, createDiscordTools(context), signal)
+    },
+    async send(reminder, body, signal) {
+        return await toolRest.post(Routes.channelMessages(reminder.channelId), { body, signal }) as { id: string; channel_id: string }
+    }
+})
+const floodChat = new FloodChat(client, undefined, toolRest, reminders)
 floodChat.start()
 
+let shuttingDown = false
+async function shutdown(): Promise<void> {
+    if (shuttingDown) return
+    shuttingDown = true
+    try {
+        await stopReminders(reminderScheduler, reminders)
+        await client.destroy()
+        process.exit(0)
+    } catch {
+        console.error('[reminders] не удалось завершить остановку')
+        process.exit(1)
+    }
+}
+process.once('SIGTERM', () => { void shutdown() })
+process.once('SIGINT', () => { void shutdown() })
+
 client.once(Events.ClientReady, () => {
+    if (shuttingDown) return
     console.log('Starting...')
+    reminderScheduler.start()
+    console.log('[reminders] обработчик напоминаний запущен')
 
     startDevTracker(client).catch((error) => console.error('[devtracker] сбой запуска:', error))
 })
@@ -70,7 +107,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             getServerEmojis(interaction.guild), getServerContext(interaction.guild, deadline)
         ])
         const answer = await askOllama(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
-            userId: interaction.user.id, text: prompt }), emojis, deadline, serverContext ? [serverContext] : [])
+            userId: interaction.user.id, text: prompt }), emojis, deadline, serverContext ? [serverContext] : [], 'chat',
+            interaction.guild ? { rest: toolRest, guildId: interaction.guild.id, channelId: interaction.channelId,
+                actorId: interaction.user.id, botId: client.user!.id, requestId: interaction.id, requestText: prompt, reminders } : undefined)
 
         await sendLongReply(interaction, answer)
     } catch (error) {
