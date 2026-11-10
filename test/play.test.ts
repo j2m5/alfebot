@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import { Collection, MessageFlags, type ChatInputCommandInteraction } from 'discord.js'
 import { replyPlay, rollSlots } from '../src/play.js'
 import type { ServerEmoji } from '../src/server-emojis.js'
+import { modelTextResponse, useTestModelKey } from './helpers/model-response.js'
+
+useTestModelKey()
 
 const emojis: ServerEmoji[] = [
     { id: '111', name: 'sanich', animated: false },
@@ -94,7 +97,7 @@ test('первое сообщение содержит только 3 серве
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         assert.deepEqual(sent.map((entry) => entry.method), ['defer', 'edit'])
         modelRequest = JSON.parse(JSON.parse(String(options.body)).messages.at(-1).content)
-        return Response.json({ message: { content: 'Кафедра случайных процессов изучает этот результат.' }, done: true })
+        return modelTextResponse('Кафедра случайных процессов изучает этот результат.')
     })
     await replyPlay(interaction)
     assert.deepEqual(sent.map((entry) => entry.method), ['defer', 'edit', 'followUp'])

@@ -1,6 +1,6 @@
 import { Client, EmbedBuilder, type SendableChannels } from 'discord.js'
 
-import { translateToRussian } from './ollama.js'
+import { translateToRussian } from './llm.js'
 import { fetchDevTrackerFeed, type DevTrackerItem } from './rss.js'
 import { loadPostedIds, savePostedIds, stateFileExists } from './state.js'
 import { splitText } from './text.js'

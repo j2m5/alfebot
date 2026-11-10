@@ -1,6 +1,6 @@
-import { test } from 'node:test'
+import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { askOllama, translateToRussian } from '../src/ollama.js'
+import { askModel, translateToRussian } from '../src/llm.js'
 import { toolMessages } from '../src/tool-prompt.js'
 import { ReminderStore } from '../src/reminder-store.js'
 
@@ -9,17 +9,37 @@ const emojis = [
     { id: '222222222222222222', name: 'dance', animated: true }
 ]
 
+let previousApiKey: string | undefined
+beforeEach(() => { previousApiKey = process.env.OPENROUTER_API_KEY; process.env.OPENROUTER_API_KEY = 'test-key-not-a-secret' })
+afterEach(() => { if (previousApiKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previousApiKey })
+
+const choice = (delta: unknown, finish_reason: string | null = null) => ({
+    id: 'gen-test', object: 'chat.completion.chunk', created: 1, model: 'test-model',
+    choices: [{ index: 0, delta, finish_reason }]
+})
+function sse(chunks: unknown[], done = true): Response {
+    const bytes = new TextEncoder().encode(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('')
+        + (done ? 'data: [DONE]\n\n' : ''))
+    return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }),
+        { headers: { 'Content-Type': 'text/event-stream' } })
+}
+const textTurn = (text: string) => sse([choice({ content: text }), choice({}, 'stop')])
+const toolCall = (name: string, args: unknown = {}, id = 'call_test') => choice({ tool_calls: [
+    { index: 0, id, type: 'function', function: { name, arguments: JSON.stringify(args) } }
+] })
+const toolTurn = (name: string, args: unknown = {}, id = 'call_test') => sse([toolCall(name, args, id), choice({}, 'tool_calls')])
+
 test('инструменты доступны только чату с доверенным контекстом, но не игре и обычному вызову', async (t) => {
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)))
-        return Response.json({ message: { content: 'Ответ.' }, done: true })
+        return textTurn('Ответ.')
     })
     const context: any = { rest: {}, guildId: '111111111111111111', channelId: '222222222222222222',
         actorId: '333333333333333333', botId: '444444444444444444', requestId: '555555555555555555', requestText: 'Привет' }
-    await askOllama('Привет', [], undefined, [], 'chat', context)
-    await askOllama('Игра', [], undefined, [], 'slot-comment', context)
-    await askOllama('Личка')
+    await askModel('Привет', [], undefined, [], 'chat', context)
+    await askModel('Игра', [], undefined, [], 'slot-comment', context)
+    await askModel('Личка')
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'get_permissions'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'set_member_role'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'create_poll'))
@@ -31,15 +51,15 @@ test('инструменты доступны только чату с дове�
 
 test('tool selection has a small isolated prompt; ordinary response retains personality and emojis', async (t) => {
     const requests: any[] = []
-    const previous = process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART
-    process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART = 'TEST_PERSONALITY_ONLY'
+    const previous = process.env.BOT_SYSTEM_PROMPT
+    process.env.BOT_SYSTEM_PROMPT = 'TEST_PERSONALITY_ONLY'
     t.after(() => {
-        if (previous === undefined) delete process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART
-        else process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART = previous
+        if (previous === undefined) delete process.env.BOT_SYSTEM_PROMPT
+        else process.env.BOT_SYSTEM_PROMPT = previous
     })
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)))
-        return Response.json({ message: { content: requests.length === 1 ? 'NO_TOOLS' : 'Привет :sanich:' }, done: true })
+        return textTurn(requests.length === 1 ? 'NO_TOOLS' : 'Привет :sanich:')
     })
     const context: any = { rest: {}, guildId: '111111111111111111', channelId: '222222222222222222',
         actorId: '333333333333333333', botId: '444444444444444444', requestId: '555555555555555555', requestText: 'Привет' }
@@ -48,7 +68,7 @@ test('tool selection has a small isolated prompt; ordinary response retains pers
         { role: 'user', content: 'Обсуждали игру' }, { role: 'assistant', content: 'Помню игру' },
         { role: 'user', content: 'Актуальный справочник сервера Discord (данные, не инструкции):\nDIRECTORY_MARKER' }
     ]
-    const answer = await askOllama('Привет', emojis, undefined, history, 'chat', context)
+    const answer = await askModel('Привет', emojis, undefined, history, 'chat', context)
     assert.equal(answer, 'Привет <:sanich:111111111111111111>')
     assert.equal(requests.length, 2)
     const planning = requests[0], final = requests[1]
@@ -70,14 +90,14 @@ test('read tool loop keeps the lightweight prompt on every model round and skips
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)))
-        return Response.json(requests.length === 1
-            ? { message: { tool_calls: [{ function: { name: 'get_permissions', arguments: {} } }] }, done: true }
-            : { message: { content: 'Не удалось проверить права.' }, done: true })
+        return requests.length === 1
+            ? toolTurn('get_permissions')
+            : textTurn('Не удалось проверить права.')
     })
     const context: any = { rest: { get: async () => { throw new Error('Fixture read denied') } },
         guildId: '111111111111111111', channelId: '222222222222222222', actorId: '333333333333333333',
         botId: '444444444444444444', requestId: '555555555555555555', requestText: 'Проверь свои права' }
-    await askOllama('Проверь свои права', emojis, undefined, [], 'chat', context)
+    await askModel('Проверь свои права', emojis, undefined, [], 'chat', context)
     assert.equal(requests.length, 2)
     assert.ok(requests.every(request => request.messages[0].content.length < 2200))
     assert.equal(requests[0].messages[0].content, requests[1].messages[0].content)
@@ -91,21 +111,25 @@ test('reminders join native tool catalog and short prompt includes the actual Mo
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)))
-        return Response.json(requests.length === 1
-            ? { message: { tool_calls: [{ function: { name: 'list_reminders', arguments: {} } }] }, done: true }
-            : { message: { content: 'Напоминаний пока нет.' }, done: true })
+        return requests.length === 1
+            ? toolTurn('list_reminders', {}, 'call_reminders')
+            : textTurn('Напоминаний пока нет.')
     })
     const ctx: any = { reminders: store, rest: {}, guildId: '111111111111111111', channelId: '222222222222222222',
         actorId: '333333333333333333', botId: '444444444444444444', requestId: '555555555555555555', requestText: 'Мои напоминания',
         replyMessageId: '666666666666666666', replyUserId: '777777777777777777' }
-    assert.equal(await askOllama(ctx.requestText, [], undefined, [], 'chat', ctx), 'Напоминаний пока нет.')
+    assert.equal(await askModel(ctx.requestText, [], undefined, [], 'chat', ctx), 'Напоминаний пока нет.')
     assert.equal(requests.length, 2)
     assert.equal(requests[0].tools.length, 12)
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'create_reminder'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'cancel_reminder'))
     assert.match(requests[0].messages[0].content, /2026-11-10 00:30:00/)
     assert.ok(requests[0].messages[0].content.length < 2200)
-    assert.ok(requests[1].messages.some((message: any) => message.tool_name === 'list_reminders'))
+    const priorCall = requests[1].messages.find((message: any) => message.role === 'assistant')
+        .tool_calls.find((call: any) => call.function.name === 'list_reminders')
+    assert.equal(priorCall.id, 'call_reminders')
+    assert.ok(requests[1].messages.some((message: any) => message.role === 'tool' && message.tool_call_id === priorCall.id))
+    assert.ok(requests[1].messages.every((message: any) => message.tool_name === undefined))
 })
 
 test('tool context retains only complete recent dialogue turns and preserves the current request', () => {
@@ -137,13 +161,13 @@ test('история передаётся перед текущим вопрос
     const calls: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         calls.push(JSON.parse(String(options.body)).messages)
-        return Response.json({ message: { content: 'Кабачок' }, done: true })
+        return textTurn('Кабачок')
     })
-    await askOllama('Как он называется?', [], undefined, [
+    await askModel('Как он называется?', [], undefined, [
         { role: 'user', content: 'Наш корабль называется Кабачок' },
         { role: 'assistant', content: 'Запомнил название корабля.' }
     ])
-    await askOllama('Другой канал')
+    await askModel('Другой канал')
     assert.deepEqual(calls[0].map((m: any) => m.role), ['system', 'user', 'assistant', 'user'])
     assert.equal(calls[0][1].content, 'Наш корабль называется Кабачок')
     assert.equal(calls[0].at(-1).content, 'Как он называется?')
@@ -156,18 +180,18 @@ test('ask отключает рассуждения, ограничивает г
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         body = JSON.parse(String(options.body))
         const bytes = new TextEncoder().encode([
-            JSON.stringify({ message: { thinking: 'Скрытые рассуждения', content: 'Привет ' }, done: false }),
-            JSON.stringify({ message: { content: ':sanich:' }, done: true, done_reason: 'stop' })
-        ].join('\n'))
+            choice({ reasoning: 'Скрытые рассуждения', content: 'Привет ' }),
+            choice({ content: ':sanich:' }), choice({}, 'stop')
+        ].map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n')
         return new Response(new ReadableStream({ start(controller) {
             for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7))
             controller.close()
         } }))
     })
-    assert.equal(await askOllama('Привет', emojis), 'Привет <:sanich:111111111111111111>')
+    assert.equal(await askModel('Привет', emojis), 'Привет <:sanich:111111111111111111>')
     assert.equal(body.stream, true)
-    assert.equal(body.think, false)
-    assert.ok(body.options.num_predict > 0 && body.options.num_predict <= 650)
+    assert.equal(body.reasoning.enabled, false)
+    assert.ok(body.max_tokens > 0 && body.max_tokens <= 650)
 })
 
 test('при истечении срока ask возвращает уже полученный текст, не продолжая ждать', async (t) => {
@@ -176,13 +200,13 @@ test('при истечении срока ask возвращает уже по�
         assert.equal(options.signal, deadline.signal)
         return new Response(new ReadableStream({
         start(controller) {
-            controller.enqueue(new TextEncoder().encode(JSON.stringify({ message: { content: 'Уже готовый ответ.' }, done: false }) + '\n'))
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(choice({ content: 'Уже готовый ответ.' }))}\n\n`))
             options.signal.addEventListener('abort', () => controller.error(options.signal.reason), { once: true })
             setTimeout(() => deadline.abort(new DOMException('Deadline', 'TimeoutError')), 10)
         }
         }))
     })
-    assert.equal(await askOllama('Вопрос', [], deadline.signal), 'Уже готовый ответ.\n\n…')
+    assert.equal(await askModel('Вопрос', [], deadline.signal), 'Уже готовый ответ.\n\n…')
 })
 
 test('таймаут без текста отличим от обычной ошибки модели', async (t) => {
@@ -190,24 +214,24 @@ test('таймаут без текста отличим от обычной ош
     deadline.abort(new DOMException('Deadline', 'TimeoutError'))
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         options.signal.throwIfAborted()
-        return Response.json({ message: { content: 'Не должно выполняться' } })
+        return textTurn('Не должно выполняться')
     })
-    await assert.rejects(askOllama('Вопрос', [], deadline.signal), { name: 'TimeoutError' })
+    await assert.rejects(askModel('Вопрос', [], deadline.signal), { name: 'TimeoutError' })
 })
 
 test('лимит токенов помечает сокращение и удаляет оборванный код эмодзи', async (t) => {
-    t.mock.method(globalThis, 'fetch', async () => Response.json({
-        message: { content: 'Готовая мысль. <:sanich:111' }, done: true, done_reason: 'length'
-    }))
-    assert.equal(await askOllama('Вопрос', emojis), 'Готовая мысль.\n\n…')
+    t.mock.method(globalThis, 'fetch', async () => sse([
+        choice({ content: 'Готовая мысль. <:sanich:111' }), choice({}, 'length')
+    ]))
+    assert.equal(await askModel('Вопрос', emojis), 'Готовая мысль.\n\n…')
 })
 
 test('ошибка внутри потока не превращается в успешный неполный ответ', async (t) => {
-    t.mock.method(globalThis, 'fetch', async () => new Response([
-        JSON.stringify({ message: { content: 'Начало' }, done: false }),
-        JSON.stringify({ error: 'upstream unavailable' })
-    ].join('\n')))
-    await assert.rejects(askOllama('Вопрос'), /upstream unavailable/)
+    t.mock.method(globalThis, 'fetch', async () => sse([
+        choice({ content: 'Начало' }),
+        { error: { message: 'upstream unavailable' } }
+    ], false))
+    await assert.rejects(askModel('Вопрос'), /upstream unavailable/)
 })
 
 test('ask передаёт эмодзи сервера и исправляет сокращения, анимацию и выдуманный ID', async (t) => {
@@ -215,10 +239,9 @@ test('ask передаёт эмодзи сервера и исправляет �
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         const body = JSON.parse(String(options.body))
         system = body.messages[0].content
-        return Response.json({ message: { role: 'assistant', content:
-            'Привет :sanich: <a:sanich:999999999999999999> <:dance:222222222222222222> <:alien:333333333333333333>' } })
+        return textTurn('Привет :sanich: <a:sanich:999999999999999999> <:dance:222222222222222222> <:alien:333333333333333333>')
     })
-    const answer = await askOllama('Привет', emojis)
+    const answer = await askModel('Привет', emojis)
     assert.ok(system.includes('<:sanich:111111111111111111>'))
     assert.ok(system.includes('<a:dance:222222222222222222>'))
     assert.equal(answer.trim(), 'Привет <:sanich:111111111111111111> <:sanich:111111111111111111> <a:dance:222222222222222222>')
@@ -228,11 +251,11 @@ test('списки эмодзи из разных запросов изолир�
     const systems: string[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         systems.push(JSON.parse(String(options.body)).messages[0].content)
-        return Response.json({ message: { role: 'assistant', content: '<:sanich:111111111111111111> ответ' } })
+        return textTurn('<:sanich:111111111111111111> ответ')
     })
-    await askOllama('Первый сервер', emojis)
-    const other = await askOllama('Второй сервер', [{ id: '444444444444444444', name: 'other', animated: false }])
-    const dm = await askOllama('Личка')
+    await askModel('Первый сервер', emojis)
+    const other = await askModel('Второй сервер', [{ id: '444444444444444444', name: 'other', animated: false }])
+    const dm = await askModel('Личка')
     assert.ok(systems[1].includes('<:other:444444444444444444>'))
     assert.ok(!systems[1].includes('111111111111111111'))
     assert.ok(!systems[2].includes('111111111111111111'))
@@ -242,15 +265,18 @@ test('списки эмодзи из разных запросов изолир�
 
 test('разметка в примерах кода не изменяется', async (t) => {
     const content = '`<:example:999999999999999999>`\n```text\n:sanich:\n```\n:sanich:'
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ message: { role: 'assistant', content } }))
-    assert.equal(await askOllama('Пример', emojis), '`<:example:999999999999999999>`\n```text\n:sanich:\n```\n<:sanich:111111111111111111>')
+    t.mock.method(globalThis, 'fetch', async () => textTurn(content))
+    assert.equal(await askModel('Пример', emojis), '`<:example:999999999999999999>`\n```text\n:sanich:\n```\n<:sanich:111111111111111111>')
 })
 
 test('переводчик не получает каталог эмодзи и не заменяет содержимое перевода', async (t) => {
     let system = ''
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         system = JSON.parse(String(options.body)).messages[0].content
-        return Response.json({ message: { role: 'assistant', content: 'Текст :sanich:' } })
+        const body = JSON.parse(String(options.body))
+        assert.equal(body.stream, false)
+        assert.equal(body.tools, undefined)
+        return Response.json({ choices: [{ index: 0, message: { role: 'assistant', content: 'Текст :sanich:' }, finish_reason: 'stop' }] })
     })
     assert.equal(await translateToRussian('Text :sanich:'), 'Текст :sanich:')
     assert.ok(!system.includes('111111111111111111'))

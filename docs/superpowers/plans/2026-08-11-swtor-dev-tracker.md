@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Бот раз в 20 минут читает RSS-ленту Dev Tracker форума swtor.com и постит новые сообщения разработчиков в Discord-канал — оригинал плюс русский перевод от Ollama.
+**Goal:** Бот раз в 20 минут читает RSS-ленту Dev Tracker форума swtor.com и постит новые сообщения разработчиков в Discord-канал — оригинал плюс русский перевод от OpenRouter.
 
-**Architecture:** Пять узких модулей: `text.ts` (разбиение строк), `rss.ts` (загрузка и парсинг ленты), `state.ts` (JSON-файл с ID опубликованного), `ollama.ts` (перевод), `devtracker.ts` (оркестрация и отправка в Discord). Вся сетевая и Discord-логика собрана в `devtracker.ts`, остальные модули — чистые функции, которые тестируются без сети.
+**Architecture:** Пять узких модулей: `text.ts` (разбиение строк), `rss.ts` (загрузка и парсинг ленты), `state.ts` (JSON-файл с ID опубликованного), `llm.ts` (перевод), `devtracker.ts` (оркестрация и отправка в Discord). Вся сетевая и Discord-логика собрана в `devtracker.ts`, остальные модули — чистые функции, которые тестируются без сети.
 
 **Tech Stack:** TypeScript (ESM, NodeNext), discord.js 14.27, fast-xml-parser 5, tsx, встроенный `node:test`.
 
@@ -30,7 +30,7 @@
 | `src/text.ts` | создать (Task 1) | `splitText` — разбиение текста по границам абзацев/слов |
 | `src/rss.ts` | создать (Task 2) | загрузка ленты, парсинг XML, тип `DevTrackerItem` |
 | `src/state.ts` | создать (Task 3) | чтение/запись JSON со списком опубликованных ID |
-| `src/ollama.ts` | изменить (Task 4) | + `translateToRussian`, общий `chatOllama` |
+| `src/llm.ts` | изменить (Task 4) | + `translateToRussian`, общий `completeOpenRouter` |
 | `src/devtracker.ts` | создать (Task 5) | конфиг, выбор новых записей, сборка эмбедов, планировщик |
 | `src/index.ts` | изменить (Task 1, Task 6) | убрать `splitText`, запустить Dev Tracker в `ClientReady` |
 | `test/*.test.ts` | создать (Tasks 1–3, 5) | тесты чистых функций |
@@ -41,7 +41,7 @@
 
 ### Task 1: Вынести `splitText` в отдельный модуль
 
-Функция уже существует в `src/index.ts` и нужна в трёх местах: `/ask`, разбиение поста на эмбеды, разбиение текста перед отправкой в Ollama. Выносим её как есть, попутно убирая из неё чужую ответственность — фолбэк-строку «Модель не вернула текст.», которая относится только к `/ask`.
+Функция уже существует в `src/index.ts` и нужна в трёх местах: `/ask`, разбиение поста на эмбеды, разбиение текста перед отправкой в OpenRouter. Выносим её как есть, попутно убирая из неё чужую ответственность — фолбэк-строку «Модель не вернула текст.», которая относится только к `/ask`.
 
 **Files:**
 - Create: `src/text.ts`
@@ -683,132 +683,23 @@ git commit -m "feat: хранение опубликованных ID Dev Tracke
 
 ---
 
-### Task 4: Перевод через Ollama
+### Task 4: Перевод через OpenRouter
 
-**Files:**
-- Modify: `src/ollama.ts` (полностью переписать: выделить `chatOllama`, добавить `translateToRussian`)
+Актуализировано 10 ноября 2026 года: клиент модели находится в `src/openrouter.ts`,
+а `translateToRussian` и `askModel` — в `src/llm.ts`.
 
-**Interfaces:**
-- Consumes: `splitText` из `src/text.js` (Task 1)
-- Produces: `translateToRussian(text: string): Promise<string>` — бросает `Error`, если хотя бы одна порция не перевелась. `askOllama(prompt: string): Promise<string>` сохраняет прежнюю сигнатуру и поведение.
+Перевод делится на порции до 3000 символов по границам абзацев и слов.
+Каждая порция отправляется в Chat Completions API с отдельным промптом переводчика,
+дедлайном 240 секунд и лимитом ответа 4096 токенов. Незавершённый или пустой ответ
+считается ошибкой; при неудаче любой порции весь пост публикуется без перевода.
 
-Автоматических тестов у этой задачи нет: обе функции — это HTTP-вызов к внешнему сервису, мокать который здесь смысла нет. Логика разбиения на порции уже покрыта тестами `splitText` из Task 1. Проверка — ручная, шагом 3.
+Подключение требует `OPENROUTER_API_KEY` и `OPENROUTER_MODEL` в `.env`.
+Настройка характера чата — `BOT_SYSTEM_PROMPT`; переводчик её не получает.
+Актуальная реализация хранится в исходниках, чтобы не дублировать клиент API в плане.
 
-**Почему порции по 3000 символов:** контекст Ollama по умолчанию 4096 токенов. Пост на 9.5к символов модель молча обрежет, и перевод потеряет хвост без единой ошибки. Порции плюс явный `num_ctx: 8192` это исключают.
-
-- [ ] **Step 1: Переписать `src/ollama.ts`**
-
-```ts
-import { splitText } from './text.js'
-
-type OllamaChatResponse = {
-    message: {
-        role: 'assistant',
-        content: string
-    }
-}
-
-type OllamaMessage = {
-    role: 'system' | 'user'
-    content: string
-}
-
-const TRANSLATION_CHUNK_SIZE = 3000
-
-const TRANSLATION_SYSTEM_PROMPT = [
-    'Ты профессиональный переводчик. Переводи текст с английского на русский.',
-    'Сохраняй разбиение на абзацы.',
-    'Не переводи имена собственные и игровые термины Star Wars: The Old Republic:',
-    'названия классов, дисциплин, планет, способностей и предметов оставляй как в оригинале.',
-    'Ничего не добавляй от себя, не комментируй и не сокращай.',
-    'В ответе верни только перевод.'
-].join(' ')
-
-async function chatOllama(messages: OllamaMessage[], timeoutMs: number, numCtx?: number): Promise<string> {
-    const baseUrl = process.env.OLLAMA_URL
-    const model = process.env.OLLAMA_MODEL
-
-    const response = await fetch(`${baseUrl}/api/chat`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model,
-            messages,
-            stream: false,
-            ...(numCtx ? { options: { num_ctx: numCtx } } : {})
-        }),
-        signal: AbortSignal.timeout(timeoutMs)
-    })
-
-    if (!response.ok) {
-        const errorText = await response.text()
-
-        throw new Error(errorText)
-    }
-
-    const data = await response.json() as OllamaChatResponse
-
-    return data.message.content.trim()
-}
-
-export async function askOllama(prompt: string): Promise<string> {
-    return chatOllama([
-        {
-            role: 'system',
-            content: 'Ты полезный ассистент в Discord. Отвечай по русски. Отвечай понятно и без лишней воды. ' + process.env.OLLAMA_SYSTEM_PROMPT_SECRET_PART,
-        },
-        {
-            role: 'user',
-            content: prompt
-        }
-    ], 120_000)
-}
-
-export async function translateToRussian(text: string): Promise<string> {
-    const parts = splitText(text, TRANSLATION_CHUNK_SIZE)
-
-    const translated: string[] = []
-
-    for (const part of parts) {
-        translated.push(await chatOllama([
-            {
-                role: 'system',
-                content: TRANSLATION_SYSTEM_PROMPT
-            },
-            {
-                role: 'user',
-                content: part
-            }
-        ], 240_000, 8192))
-    }
-
-    return translated.join('\n\n')
-}
-```
-
-- [ ] **Step 2: Проверить, что проект собирается**
-
-Run: `npm run build`
-Expected: выходит без ошибок
-
-- [ ] **Step 3: Проверить перевод вручную**
-
-Требуется поднятая Ollama и заполненные `OLLAMA_URL` / `OLLAMA_MODEL` в `.env`.
-
-Run:
-```bash
-npx tsx -e "import('dotenv/config').then(() => import('./src/ollama.ts')).then(async (m) => { console.log(await m.translateToRussian('Hello everyone,\n\nAdding the following to the known issues list.')) })"
-```
-Expected: осмысленный русский перевод, без английского текста и без комментариев модели
-
-- [ ] **Step 4: Закоммитить**
-
-```bash
-git add src/ollama.ts
-git commit -m "feat: перевод текста на русский через Ollama"
-```
+Проверка: `npm test` (включая `test/llm.test.ts` и `test/openrouter.test.ts`),
+затем `npm run build`. Живую проверку выполнять отдельным запросом перевода,
+без публикации тестовых сообщений в Discord.
 
 ---
 
@@ -820,7 +711,7 @@ git commit -m "feat: перевод текста на русский через 
 - Modify: `package.json` (расширить скрипт `test`)
 
 **Interfaces:**
-- Consumes: `DevTrackerItem`, `fetchDevTrackerFeed` из `src/rss.js`; `loadPostedIds`, `savePostedIds`, `stateFileExists` из `src/state.js`; `translateToRussian` из `src/ollama.js`; `splitText` из `src/text.js`
+- Consumes: `DevTrackerItem`, `fetchDevTrackerFeed` из `src/rss.js`; `loadPostedIds`, `savePostedIds`, `stateFileExists` из `src/state.js`; `translateToRussian` из `src/llm.js`; `splitText` из `src/text.js`
 - Produces:
   - `type DevTrackerConfig = { channelId: string; feedUrl: string; stateFile: string; intervalMs: number; seedPostCount: number }`
   - `readConfig(env: NodeJS.ProcessEnv): DevTrackerConfig | null` — `null`, если не задан `DEV_TRACKER_CHANNEL_ID`
@@ -1000,7 +891,7 @@ Expected: FAIL — `Cannot find module '.../src/devtracker.js'`
 ```ts
 import { Client, EmbedBuilder, type SendableChannels } from 'discord.js'
 
-import { translateToRussian } from './ollama.js'
+import { translateToRussian } from './llm.js'
 import { fetchDevTrackerFeed, type DevTrackerItem } from './rss.js'
 import { loadPostedIds, savePostedIds, stateFileExists } from './state.js'
 import { splitText } from './text.js'
@@ -1350,7 +1241,7 @@ Expected:
 - Появился файл `data/devtracker.json` с 25 ID
 
 6. Перезапустить `npm run dev` и убедиться, что **ничего не публикуется повторно** и в логе нет строки про первый запуск.
-7. Проверить фолбэк перевода: остановить Ollama (или поставить `OLLAMA_URL` на несуществующий адрес), удалить `data/devtracker.json`, запустить снова. Ожидается: записи публикуются с пометкой `_перевод недоступен_`, в логе есть `[devtracker] перевод не удался`, бот не падает.
+7. Проверить фолбэк перевода: в тестовом окружении временно указать недействительный `OPENROUTER_API_KEY`, удалить `data/devtracker.json`, запустить снова. Ожидается: записи публикуются с пометкой `_перевод недоступен_`, в логе есть `[devtracker] перевод не удался`, бот не падает.
 8. Проверить, что `/ask` продолжает работать при выключенной ленте: убрать `DEV_TRACKER_CHANNEL_ID` из `.env`, запустить, увидеть в логе `[devtracker] DEV_TRACKER_CHANNEL_ID не задан, лента отключена`, выполнить `/ask` в Discord и получить ответ.
 9. Вернуть `DEV_TRACKER_SEED_POST_COUNT=0` в `.env`.
 

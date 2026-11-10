@@ -4,9 +4,9 @@
 
 **Goal:** Let the bot read Discord data and carry out the user's authorized moderation requests through MCP tools.
 
-**Architecture:** A per-question in-memory MCP session binds trusted Discord context to a permission-checking backend. A bounded Ollama loop passes native tool calls/results and preserves confirmed action receipts on timeout.
+**Architecture:** A per-question in-memory MCP session binds trusted Discord context to a permission-checking backend. A bounded OpenRouter loop passes native tool calls/results and preserves confirmed action receipts on timeout.
 
-**Tech Stack:** TypeScript, discord.js 14, Node 22, official MCP SDK 1.32.2, Zod 4, Ollama tool calling.
+**Tech Stack:** TypeScript, discord.js 14, Node 22, official MCP SDK 1.32.2, Zod 4, OpenRouter tool calling.
 
 **Spec:** `docs/superpowers/specs/2026-11-09-discord-tools.md`
 
@@ -40,20 +40,20 @@ Interface: `createDiscordTools(context: DiscordToolContext): ToolBackend`. `defi
 
 ## Task 2: MCP and model loop
 
-Files: `src/mcp-tools.ts`, `src/ollama-agent.ts`, `src/ollama-stream.ts`, `test/mcp-tools.test.ts`, `test/ollama-agent.test.ts`.
+Files: `src/mcp-tools.ts`, `src/llm-agent.ts`, `src/openrouter.ts`, `test/mcp-tools.test.ts`, `test/llm-agent.test.ts`.
 
 Interfaces: `createToolSession(backend: ToolBackend, signal: AbortSignal): Promise<ToolSession>`; `streamTurn(messages,signal,tools?)` collects content plus native tool calls; `runToolConversation(messages,session,signal)` owns the bounded loop.
 
 - [x] Drive a real MCP linked transport with a fake backend; list tools and call one, checking arguments and result roundtrip. Verify caller fields cannot be supplied as authority.
-- [x] Drive streamed Ollama fixtures: tool call first, tool result passed back, final text returned. Ensure speculative pre-tool text is discarded.
+- [x] Drive streamed OpenRouter fixtures: tool call first, tool result passed back, final text returned. Ensure speculative pre-tool text is discarded.
 - [x] Exercise max calls/rounds, duplicate mutations, malformed calls, mid-stream abort and confirmed/uncertain action receipts after model failure.
 - [x] Keep `streamAnswer` as a compatible wrapper for existing non-tool callers and tests.
 
 ## Task 3: Conversation integration
 
-Files: `src/ollama.ts`, `src/index.ts`, `src/flood-chat.ts`, `test/flood-chat.test.ts`, `package.json`, `docs/flood-chat.md`.
+Files: `src/llm.ts`, `src/index.ts`, `src/flood-chat.ts`, `test/flood-chat.test.ts`, `package.json`, `docs/flood-chat.md`.
 
-- [x] Add optional trusted tool context to `askOllama`; lazily create/close MCP only for guild chat style.
+- [x] Add optional trusted tool context to `askModel`; lazily create/close MCP only for guild chat style.
 - [x] Bind actual Discord author/guild/channel/request and reply IDs at all three conversational entry points. Use a REST client with automatic network retries disabled for mutation execution.
 - [x] Replace the obsolete prompt statement that the bot cannot act with exact tool-use rules; retain role-topic restraint and humor.
 - [x] Test reset cancellation during tool authorization and ensure play/translation/DM lack mutation tools.

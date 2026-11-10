@@ -1,5 +1,5 @@
 import type { ConversationTurn } from './conversation-memory.js'
-import type { ModelMessage } from './ollama-stream.js'
+import type { ModelMessage } from './model-types.js'
 import type { DiscordToolContext } from './tool-types.js'
 
 const BULK_CONTEXT_PREFIXES = [

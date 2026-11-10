@@ -1,4 +1,5 @@
-import { streamTurn, type ModelMessage } from './ollama-stream.js'
+import { streamTurn } from './openrouter.js'
+import type { ModelMessage } from './model-types.js'
 import type { ToolOutcome, ToolSession } from './tool-types.js'
 
 const LIMIT = 'Достигнут лимит обращений к инструментам. Уточни вопрос или отправь следующий запрос.'
@@ -15,7 +16,7 @@ export async function runToolConversation(
         let turn
         try {
             signal.throwIfAborted()
-            turn = await streamTurn(messages, signal, round < 2 ? session.definitions : [])
+            turn = await streamTurn(messages, signal, session.definitions, round < 2)
         } catch (error) {
             if (lastResult && !lastResult.ok) return lastResult.message
             throw error
@@ -31,7 +32,7 @@ export async function runToolConversation(
         if (round === 2 || callCount + turn.toolCalls.length > 4) return LIMIT
         const mutations = turn.toolCalls.filter(call => definitions.get(call.function.name)?.mutating)
         if (mutations.length > 1) return 'За один запрос можно выполнить только одно действие. Уточни, какое нужно сделать.'
-        messages.push({ role: 'assistant', content: '', tool_calls: turn.toolCalls })
+        messages.push({ role: 'assistant', content: turn.content, tool_calls: turn.toolCalls })
         for (const call of turn.toolCalls) {
             signal.throwIfAborted()
             callCount++
@@ -42,7 +43,7 @@ export async function runToolConversation(
             lastResult = result
             // Итог изменения формирует исполнитель, без новой генерации и риска повторить запись.
             if (definition?.mutating) return result.message
-            messages.push({ role: 'tool', tool_name: call.function.name, content: JSON.stringify(result) })
+            messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) })
         }
     }
     return LIMIT

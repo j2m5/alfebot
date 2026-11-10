@@ -6,6 +6,9 @@ import type { Client, Message, ChatInputCommandInteraction } from 'discord.js'
 import { Collection, MessageFlags, PermissionFlagsBits, Routes } from 'discord.js'
 import { EventEmitter } from 'node:events'
 import { ReminderStore } from '../src/reminder-store.js'
+import { modelTextResponse, modelToolResponse, useTestModelKey } from './helpers/model-response.js'
+
+useTestModelKey()
 
 const base = { channelId: FLOOD_CHANNEL_ID, author: { bot: false }, webhookId: null, content: 'привет', system: false }
 
@@ -91,7 +94,7 @@ test('обычный чат записывается без модели; упо
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)).messages)
-        return Response.json({ message: { content: 'Наш корабль — Кабачок.' }, done: true })
+        return modelTextResponse('Наш корабль — Кабачок.')
     })
     await chat.onMessage(message('background', 'Корабль называется Кабачок'))
     assert.equal(requests.length, 0)
@@ -131,7 +134,7 @@ test('диалог получает свежий справочник после
     const requests: any[][] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)).messages)
-        return Response.json({ message: { content: 'Роль найдена.' }, done: true })
+        return modelTextResponse('Роль найдена.')
     })
     await chat.onMessage(message('background', 'Раньше роль называлась Страж'))
     await chat.onMessage(message('question', '<@123> Какие права у Командира?', { guild }))
@@ -181,7 +184,7 @@ test('удаление вопроса во время генерации пре�
     const { chat, memory, sent, message } = setup(t)
     t.mock.method(globalThis, 'fetch', async () => {
         memory.remove('question')
-        return Response.json({ message: { content: 'Уже не нужен' }, done: true })
+        return modelTextResponse('Уже не нужен')
     })
     await chat.onMessage(message('question', '<@123> ответь'))
     assert.equal(sent.length, 0)
@@ -245,7 +248,7 @@ test('удаление или изменение запроса во время 
         let modelCalls = 0
         const mock = t.mock.method(globalThis, 'fetch', async () => {
             modelCalls++
-            return Response.json({ message: { content: 'Готово.' }, done: true })
+            return modelTextResponse('Готово.')
         })
         const task = chat.onMessage(message('question', '<@123> поставь таймаут @участник на 5 минут', {
             reference: { messageId: 'uncached', channelId: FLOOD_CHANNEL_ID },
@@ -280,9 +283,7 @@ test('reset во время авторизации MCP не даёт инстр�
             : [{ user: { id: actorId, username: 'Алиса' }, roles: [] }] } } }
     const client = { user: { id: botId }, channels: { fetch: async () => ({ guildId }) } } as unknown as Client
     const chat = new FloodChat(client, memory, rest as any)
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ message: {
-        tool_calls: [{ function: { name: 'set_timeout', arguments: { userId: targetId, minutes: 5 } } }]
-    }, done: true }))
+    t.mock.method(globalThis, 'fetch', async () => modelToolResponse('set_timeout', { userId: targetId, minutes: 5 }))
     const task = chat.onMessage(message('777777777777777777', `<@${botId}> поставь таймаут <@${targetId}> на 5 минут`, {
         guild, author: { id: actorId, username: 'Алиса', bot: false }
     }))
@@ -297,9 +298,7 @@ test('reset во время авторизации MCP не даёт инстр�
 
 test('ответ из одного выдуманного эмодзи не оставляет обращение без сообщения', async (t) => {
     const { chat, sent, message } = setup(t)
-    t.mock.method(globalThis, 'fetch', async () => Response.json({
-        message: { content: '<:invented:999999999999999999>' }, done: true
-    }))
+    t.mock.method(globalThis, 'fetch', async () => modelTextResponse('<:invented:999999999999999999>'))
     await chat.onMessage(message('question', '<@123> ответь'))
     assert.equal(sent.length, 1)
     assert.equal(sent[0].content, 'Модель не вернула текст.')
@@ -311,7 +310,7 @@ test('slash-вопрос сохраняется вместе с ответом; 
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)).messages)
-        return Response.json({ message: { content: 'Кабачок' }, done: true })
+        return modelTextResponse('Кабачок')
     })
     function interaction(id: string): ChatInputCommandInteraction {
         return {
@@ -431,7 +430,7 @@ test('reply на старый ответ после reset запускает н�
     const requests: any[] = []
     t.mock.method(globalThis, 'fetch', async (_url, options) => {
         requests.push(JSON.parse(String(options.body)).messages)
-        return Response.json({ message: { content: 'Начинаем заново' }, done: true })
+        return modelTextResponse('Начинаем заново')
     })
     await chat.onMessage(message('fresh', 'Привет!', {
         reference: { messageId: 'old', channelId: FLOOD_CHANNEL_ID },
@@ -458,7 +457,7 @@ test('reset отменяет текущую генерацию и освобож
             return oldResponse.promise
         }
         assert.ok(!String(options.body).includes('Старый вопрос'))
-        return Response.json({ message: { content: 'Новый ответ' }, done: true })
+        return modelTextResponse('Новый ответ')
     })
     const oldTask = chat.onMessage(message('old', '<@123> Старый вопрос'))
     await started.promise
@@ -466,7 +465,7 @@ test('reset отменяет текущую генерацию и освобож
     const aborted = oldSignal.aborted
     time++
     await chat.onMessage(message('new', '<@123> Новый вопрос'))
-    oldResponse.resolve(Response.json({ message: { content: 'Забытый ответ' }, done: true }))
+    oldResponse.resolve(modelTextResponse('Забытый ответ'))
     await oldTask
     assert.equal(aborted, true)
     assert.deepEqual(sent.map((reply) => reply.content), ['Новый ответ'])
@@ -494,7 +493,7 @@ test('сброс во время /ask удаляет ожидание, не пу
     const task = chat.answerSlash(interaction, 'Старый вопрос')
     await started.promise
     await chat.resetMemory(resetInteraction().interaction)
-    response.resolve(Response.json({ message: { content: 'Забытый ответ' }, done: true }))
+    response.resolve(modelTextResponse('Забытый ответ'))
     await task
     assert.equal(signal.aborted, true)
     assert.equal(sent.length, 0)
@@ -507,7 +506,7 @@ test('если сброс произошёл во время отправки о
     const sending = deferred<void>()
     const sentResponse = deferred<Message>()
     let deleted = 0
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ message: { content: 'Старый ответ' }, done: true }))
+    t.mock.method(globalThis, 'fetch', async () => modelTextResponse('Старый ответ'))
     const task = chat.onMessage(message('question', '<@123> Вопрос', { reply: async () => {
         sending.resolve()
         return sentResponse.promise
@@ -540,7 +539,7 @@ test('отклонённый повторный /reset не отменяет о�
     await started.promise
     await chat.resetMemory(resetInteraction('bob').interaction)
     const aborted = signal.aborted
-    response.resolve(Response.json({ message: { content: 'Новый ответ' }, done: true }))
+    response.resolve(modelTextResponse('Новый ответ'))
     await task
     assert.equal(aborted, false)
     assert.deepEqual(sent.map((entry) => entry.content), ['Новый ответ'])
@@ -554,7 +553,7 @@ test('reset во время deferReply не даёт старому /ask нач�
     let requests = 0
     t.mock.method(globalThis, 'fetch', async () => {
         requests++
-        return Response.json({ message: { content: 'Старый ответ' }, done: true })
+        return modelTextResponse('Старый ответ')
     })
     const interaction = {
         id: 'delayed-ask', channelId: FLOOD_CHANNEL_ID, createdTimestamp: Date.now(),

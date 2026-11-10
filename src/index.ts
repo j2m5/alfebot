@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { Client, Events, GatewayIntentBits, Partials, MessageFlags, Routes } from 'discord.js'
-import { askOllama } from './ollama.js'
+import { askModel } from './llm.js'
 import { splitText } from './text.js'
 import { startDevTracker } from './devtracker.js'
 import { replySan, startSanich } from './sanich.js'
@@ -106,7 +106,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const [emojis, serverContext] = await Promise.all([
             getServerEmojis(interaction.guild), getServerContext(interaction.guild, deadline)
         ])
-        const answer = await askOllama(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
+        const answer = await askModel(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
             userId: interaction.user.id, text: prompt }), emojis, deadline, serverContext ? [serverContext] : [], 'chat',
             interaction.guild ? { rest: toolRest, guildId: interaction.guild.id, channelId: interaction.channelId,
                 actorId: interaction.user.id, botId: client.user!.id, requestId: interaction.id, requestText: prompt, reminders } : undefined)

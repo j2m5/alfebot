@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto'
 import { MessageFlags, type ChatInputCommandInteraction } from 'discord.js'
-import { askOllama } from './ollama.js'
+import { askModel } from './llm.js'
 import { emojiCode, getServerEmojis, type ServerEmoji } from './server-emojis.js'
 
 export type SlotResult = {
@@ -45,7 +45,7 @@ export async function replyPlay(interaction: ChatInputCommandInteraction): Promi
     await interaction.editReply({ content: result.emojis.map(emojiCode).join(' '), allowedMentions: { parse: [] } })
     let comment: string
     try {
-        comment = await askOllama(JSON.stringify({
+        comment = await askModel(JSON.stringify({
             outcome: result.outcome,
             outcomeMeaning: {
                 jackpot: 'все три эмодзи совпали, это победа',

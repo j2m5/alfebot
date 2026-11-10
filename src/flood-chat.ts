@@ -1,6 +1,6 @@
 import { Events, MessageFlags, type Client, type Message, type ChatInputCommandInteraction } from 'discord.js'
 import { ConversationMemory, FLOOD_CHANNEL_ID } from './conversation-memory.js'
-import { askOllama } from './ollama.js'
+import { askModel } from './llm.js'
 import { getServerEmojis } from './server-emojis.js'
 import { getServerContext } from './server-context.js'
 import { splitText } from './text.js'
@@ -208,7 +208,7 @@ export class FloodChat {
                 getServerEmojis(message.guild), getServerContext(message.guild, pending.signal)
             ])
             if (!pending.current()) return
-            const answer = await askOllama(prompt, emojis, pending.signal, serverContext ? [...history, serverContext] : history,
+            const answer = await askModel(prompt, emojis, pending.signal, serverContext ? [...history, serverContext] : history,
                 'chat', this.toolRest && message.guild ? { rest: this.toolRest, guildId: message.guild.id,
                     channelId: message.channelId, actorId: message.author.id, botId, requestId: message.id,
                     requestText, replyMessageId: referenceId, replyUserId: parent?.authorId, reminders: this.reminders } : undefined)
@@ -261,7 +261,7 @@ export class FloodChat {
                 getServerEmojis(interaction.guild), getServerContext(interaction.guild, pending.signal)
             ])
             if (!pending.current()) return
-            const answer = await askOllama(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
+            const answer = await askModel(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
                 userId: interaction.user.id, text: prompt }), emojis, pending.signal, serverContext ? [...history, serverContext] : history,
                 'chat', this.toolRest && interaction.guild ? { rest: this.toolRest, guildId: interaction.guild.id,
                     channelId: interaction.channelId, actorId: interaction.user.id, botId: this.client.user!.id,
