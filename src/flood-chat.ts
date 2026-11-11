@@ -1,6 +1,7 @@
 import { Events, MessageFlags, type Client, type Message, type ChatInputCommandInteraction } from 'discord.js'
 import { ConversationMemory, FLOOD_CHANNEL_ID } from './conversation-memory.js'
 import { askModel } from './llm.js'
+import { ProviderError } from './model-client.js'
 import { getServerEmojis } from './server-emojis.js'
 import { getServerContext } from './server-context.js'
 import { splitText } from './text.js'
@@ -31,8 +32,19 @@ export function isFloodTrigger(
 }
 
 export function answerError(error: unknown): string {
+    const failures = (error instanceof AggregateError ? error.errors : [error])
+        .filter((failure): failure is ProviderError => failure instanceof ProviderError)
+    const dailyLimit = (failure?: ProviderError) => failure?.status === 429 && /free-models-per-day|daily free limit/i.test(failure.message)
+    if (dailyLimit(failures[1])) {
+        return 'Сервис модели сейчас недоступен, а резерв исчерпал дневную квоту. Попробуйте позже.'
+    }
+    if (dailyLimit(failures[0])) {
+        return failures.length > 1 ? 'Дневная квота модели исчерпана, резерв тоже не ответил. Попробуйте позже.'
+            : 'Дневная квота модели исчерпана. Попробуйте после её обновления.'
+    }
+    if (failures.some(failure => failure.retryable)) return 'Сервис модели временно недоступен. Попробуйте позже.'
     return error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)
-        ? 'Алфе не дождался ответа модели за 30 секунд. Попробуйте ещё раз чуть позже!'
+        ? 'Алфе не дождался ответа модели. Попробуйте ещё раз чуть позже!'
         : 'Алфе зодумолся... Попробуйте позже!'
 }
 
@@ -52,13 +64,13 @@ export class FloodChat {
         private readonly toolRest?: DiscordToolContext['rest'],
         private readonly reminders?: DiscordToolContext['reminders']) {}
 
-    private beginAnswer(deadline: AbortSignal, sourceMessageId?: string): PendingAnswer | null {
+    private beginAnswer(sourceMessageId?: string): PendingAnswer | null {
         const release = answerGate.acquire()
         if (!release) return null
         const controller = new AbortController()
         const revision = this.memory.resetAt
         const pending: PendingAnswer = {
-            signal: AbortSignal.any([deadline, controller.signal]),
+            signal: controller.signal,
             sourceMessageId,
             current: () => this.memory.resetAt === revision && !controller.signal.aborted,
             finish: () => {
@@ -168,7 +180,6 @@ export class FloodChat {
 
     async onMessage(message: Message): Promise<void> {
         if (message.channelId !== FLOOD_CHANNEL_ID || message.author.bot || message.webhookId || message.system) return
-        const deadline = AbortSignal.timeout(28_000)
         const revision = this.memory.resetAt
         this.record(message)
         if (!this.memory.get(message.id)) return
@@ -179,7 +190,7 @@ export class FloodChat {
         let replyToBot = parent?.authorId === botId
         if (!isFloodTrigger(message, botId, replyToBot) && (!referenceId || parent)) return
         // Register cancellation before the first await, including an uncached reply lookup.
-        const pending = this.beginAnswer(deadline, message.id)
+        const pending = this.beginAnswer(message.id)
         try {
             if (referenceId && !parent) {
                 const referenced = await within(message.channel.messages.fetch(referenceId), null)
@@ -245,8 +256,7 @@ export class FloodChat {
             await interaction.reply({ content: 'Память уже сброшена. Отправь новый вопрос.', flags: MessageFlags.Ephemeral })
             return
         }
-        const deadline = AbortSignal.timeout(28_000)
-        const pending = this.beginAnswer(deadline)
+        const pending = this.beginAnswer()
         if (!pending) { await interaction.reply({ content: BUSY, flags: MessageFlags.Ephemeral }); return }
         try {
             await interaction.deferReply()

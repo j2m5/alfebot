@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict'
-import { afterEach, beforeEach, test } from 'node:test'
+import { test } from 'node:test'
 import { runToolConversation } from '../src/llm-agent.js'
 import type { ToolSession } from '../src/tool-types.js'
+import { useTestModelKey } from './helpers/model-response.js'
 
 const definitions = [
     { name: 'read', description: 'Read', inputSchema: { type: 'object' as const }, mutating: false },
     { name: 'write', description: 'Write', inputSchema: { type: 'object' as const }, mutating: true }
 ]
-let previousApiKey: string | undefined
-beforeEach(() => { previousApiKey = process.env.OPENROUTER_API_KEY; process.env.OPENROUTER_API_KEY = 'test-key-not-a-secret' })
-afterEach(() => { if (previousApiKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previousApiKey })
+useTestModelKey()
 const choice = (delta: unknown, finish_reason: string | null = null) => ({
     id: 'gen-test', object: 'chat.completion.chunk', created: 1, model: 'test-model',
     choices: [{ index: 0, delta, finish_reason }]

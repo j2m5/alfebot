@@ -1,17 +1,21 @@
-import { afterEach, beforeEach, test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { askModel, translateToRussian } from '../src/llm.js'
 import { toolMessages } from '../src/tool-prompt.js'
 import { ReminderStore } from '../src/reminder-store.js'
+import { modelAfterMinute, useTestModelKey } from './helpers/model-response.js'
 
 const emojis = [
     { id: '111111111111111111', name: 'sanich', animated: false },
     { id: '222222222222222222', name: 'dance', animated: true }
 ]
 
-let previousApiKey: string | undefined
-beforeEach(() => { previousApiKey = process.env.OPENROUTER_API_KEY; process.env.OPENROUTER_API_KEY = 'test-key-not-a-secret' })
-afterEach(() => { if (previousApiKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previousApiKey })
+useTestModelKey()
+
+test('обычный вызов модели получает полный ответ даже через минуту', async t => {
+    modelAfterMinute(t, 'Дождались полного ответа.')
+    assert.equal(await askModel('Ответь, когда будешь готов.'), 'Дождались полного ответа.')
+})
 
 const choice = (delta: unknown, finish_reason: string | null = null) => ({
     id: 'gen-test', object: 'chat.completion.chunk', created: 1, model: 'test-model',

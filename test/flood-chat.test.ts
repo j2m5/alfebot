@@ -6,7 +6,7 @@ import type { Client, Message, ChatInputCommandInteraction } from 'discord.js'
 import { Collection, MessageFlags, PermissionFlagsBits, Routes } from 'discord.js'
 import { EventEmitter } from 'node:events'
 import { ReminderStore } from '../src/reminder-store.js'
-import { modelTextResponse, modelToolResponse, useTestModelKey } from './helpers/model-response.js'
+import { modelAfterMinute, modelTextResponse, modelToolResponse, useTestModelKey } from './helpers/model-response.js'
 
 useTestModelKey()
 
@@ -71,6 +71,35 @@ function resetInteraction(userId = 'alice', guildId: string | null = 'guild') {
     } as unknown as ChatInputCommandInteraction
     return { interaction, sent }
 }
+
+test('ответ во флудилке после минуты ожидания публикуется и сохраняется целиком', async t => {
+    const { chat, memory, sent, message } = setup(t)
+    modelAfterMinute(t, 'Долгий ответ без обрыва.')
+    t.mock.method(console, 'error', () => {})
+    await chat.onMessage(message('slow-question', '<@123> Подумай и ответь.'))
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].content, 'Долгий ответ без обрыва.')
+    assert.equal(memory.get('answer-1')?.content, 'Долгий ответ без обрыва.')
+})
+
+test('/ask дожидается ответа дольше минуты и сохраняет связь с вопросом', async t => {
+    const { chat, memory, message } = setup(t)
+    modelAfterMinute(t, 'Полный ответ на /ask.')
+    t.mock.method(console, 'error', () => {})
+    const sent: string[] = []
+    const interaction = {
+        id: 'slow', channelId: FLOOD_CHANNEL_ID, createdTimestamp: Date.now(),
+        user: { id: 'alice', username: 'Алиса' }, guild: null, deferred: true,
+        deferReply: async () => {},
+        editReply: async (options: any) => {
+            sent.push(options.content)
+            return message('slow-answer', options.content, { author: { id: '123', bot: true, username: 'Алфе' } })
+        }
+    } as unknown as ChatInputCommandInteraction
+    await chat.answerSlash(interaction, 'Подумай и ответь.')
+    assert.deepEqual(sent, ['Полный ответ на /ask.'])
+    assert.equal(memory.get('slow-answer')?.parentId, 'ask:slow')
+})
 
 test('reset conversation memory preserves scheduled reminders', async t => {
     const { memory, client } = setup(t)

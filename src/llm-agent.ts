@@ -1,4 +1,4 @@
-import { streamTurn } from './openrouter.js'
+import { streamTurn } from './model-client.js'
 import type { ModelMessage } from './model-types.js'
 import type { ToolOutcome, ToolSession } from './tool-types.js'
 

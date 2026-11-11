@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Collection, MessageFlags, type ChatInputCommandInteraction } from 'discord.js'
 import { replyPlay, rollSlots } from '../src/play.js'
 import type { ServerEmoji } from '../src/server-emojis.js'
-import { modelTextResponse, useTestModelKey } from './helpers/model-response.js'
+import { modelAfterMinute, modelTextResponse, useTestModelKey } from './helpers/model-response.js'
 
 useTestModelKey()
 
@@ -108,6 +108,16 @@ test('первое сообщение содержит только 3 серве
     assert.equal(modelRequest.outcome, { 1: 'jackpot', 2: 'pair', 3: 'miss' }[new Set(codes).size])
     assert.equal(sent[2].content, 'Кафедра случайных процессов изучает этот результат.')
     for (const message of sent.slice(1)) assert.deepEqual(message.allowedMentions, { parse: [] })
+})
+
+test('/play дожидается медленного комментария и отправляет его после результата', async t => {
+    const { interaction, sent } = playInteraction()
+    modelAfterMinute(t, 'Кафедра вероятностей наконец закончила совещание.')
+    t.mock.method(console, 'error', () => {})
+    await replyPlay(interaction)
+    assert.deepEqual(sent.map(entry => entry.method), ['defer', 'edit', 'followUp'])
+    assert.match(sent[1].content, /^<a?:\w+:\d+> <a?:\w+:\d+> <a?:\w+:\d+>$/)
+    assert.equal(sent[2].content, 'Кафедра вероятностей наконец закончила совещание.')
 })
 
 test('ошибка модели оставляет результат игры и отправляет понятное второе сообщение', async (t) => {

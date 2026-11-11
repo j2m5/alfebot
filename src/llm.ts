@@ -1,6 +1,6 @@
 import { splitText } from './text.js'
 import { emojiInstructions, normalizeServerEmojis, type ServerEmoji } from './server-emojis.js'
-import { streamAnswer, completeOpenRouter } from './openrouter.js'
+import { streamAnswer, completeModel } from './model-client.js'
 import type { ConversationTurn } from './conversation-memory.js'
 import type { DiscordToolContext } from './tool-types.js'
 import type { ModelMessage } from './model-types.js'
@@ -24,7 +24,7 @@ const TRANSLATION_SYSTEM_PROMPT = [
 export async function askModel(
     prompt: string,
     emojis: readonly ServerEmoji[] = [],
-    signal: AbortSignal = AbortSignal.timeout(28_000),
+    signal: AbortSignal = new AbortController().signal,
     history: readonly ConversationTurn[] = [],
     style: AskStyle = 'chat',
     toolContext?: DiscordToolContext
@@ -95,7 +95,7 @@ export async function translateToRussian(text: string): Promise<string> {
     const translated: string[] = []
 
     for (const part of parts) {
-        translated.push(await completeOpenRouter([
+        translated.push(await completeModel([
             {
                 role: 'system',
                 content: TRANSLATION_SYSTEM_PROMPT

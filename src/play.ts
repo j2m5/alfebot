@@ -53,7 +53,7 @@ export async function replyPlay(interaction: ChatInputCommandInteraction): Promi
                 miss: 'все три эмодзи разные, совпадений нет'
             }[result.outcome],
             emojis: result.emojis.map(emojiCode)
-        }), emojis, AbortSignal.timeout(28_000), [], 'slot-comment')
+        }), emojis, undefined, [], 'slot-comment')
     } catch (error) {
         console.error('[play] не удалось получить комментарий модели:', error)
         comment = 'Алфе задумался над комментарием. Результат уже показан выше.'

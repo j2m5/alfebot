@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { askModel, translateToRussian } from '../src/llm.js'
-import { streamTurn } from '../src/openrouter.js'
+import { streamTurn } from '../src/model-client.js'
 import { runToolConversation } from '../src/llm-agent.js'
 import type { ToolSession } from '../src/tool-types.js'
 
-const envNames = ['OPENROUTER_API_KEY', 'OPENROUTER_MODEL'] as const
+const envNames = ['OPENROUTER_API_KEY', 'OPENROUTER_MODEL', 'LLM_PROVIDER', 'LLM_FALLBACK_PROVIDER'] as const
 let previous: Record<string, string | undefined>
 beforeEach(() => {
     previous = Object.fromEntries(envNames.map(name => [name, process.env[name]]))
     process.env.OPENROUTER_API_KEY = 'test-key-not-a-secret'
+    process.env.LLM_PROVIDER = 'openrouter'
+    delete process.env.LLM_FALLBACK_PROVIDER
     delete process.env.OPENROUTER_MODEL
 })
 afterEach(() => {
@@ -183,6 +185,16 @@ test('OpenRouter requires an API key before making any request', async t => {
     t.mock.method(globalThis, 'fetch', async () => { requests++; return sse([choice({ content: 'Unexpected' }, 'stop')]) })
     await assert.rejects(streamTurn(messages, signal()), /OPENROUTER_API_KEY/)
     assert.equal(requests, 0)
+})
+
+test('existing installations without provider selection still use OpenRouter', async t => {
+    delete process.env.LLM_PROVIDER
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions')
+        assert.equal(new Headers(options.headers).get('Authorization'), 'Bearer test-key-not-a-secret')
+        return sse([choice({ content: 'Привет' }, 'stop')])
+    })
+    assert.equal((await streamTurn(messages, signal())).content, 'Привет')
 })
 
 test('OpenRouter translation uses the same provider with a separate output budget and rejects truncated text', async t => {

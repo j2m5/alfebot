@@ -93,7 +93,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await floodChat.answerSlash(interaction, prompt).catch((error) => console.error('[chat] ошибка Discord:', error))
         return
     }
-    const deadline = AbortSignal.timeout(28_000)
+    const signal = new AbortController().signal
     const release = answerGate.acquire()
     if (!release) {
         await interaction.reply({ content: 'Сейчас отвечаю на другой вопрос. Повтори обращение через несколько секунд.', flags: MessageFlags.Ephemeral })
@@ -104,10 +104,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply()
 
         const [emojis, serverContext] = await Promise.all([
-            getServerEmojis(interaction.guild), getServerContext(interaction.guild, deadline)
+            getServerEmojis(interaction.guild), getServerContext(interaction.guild, signal)
         ])
         const answer = await askModel(JSON.stringify({ author: interaction.user.globalName ?? interaction.user.username,
-            userId: interaction.user.id, text: prompt }), emojis, deadline, serverContext ? [serverContext] : [], 'chat',
+            userId: interaction.user.id, text: prompt }), emojis, signal, serverContext ? [serverContext] : [], 'chat',
             interaction.guild ? { rest: toolRest, guildId: interaction.guild.id, channelId: interaction.channelId,
                 actorId: interaction.user.id, botId: client.user!.id, requestId: interaction.id, requestText: prompt, reminders } : undefined)
 
