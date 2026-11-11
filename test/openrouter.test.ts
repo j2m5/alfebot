@@ -23,7 +23,7 @@ const messages = [{ role: 'user', content: 'Привет' }]
 const signal = () => new AbortController().signal
 const choice = (delta: unknown, finish_reason: string | null = null) => ({
     id: 'gen-test', object: 'chat.completion.chunk', created: 1,
-    model: 'nvidia/nemotron-3-ultra-550b-a55b:free',
+    model: 'nvidia/nemotron-3.5-super-vl:free',
     choices: [{ index: 0, delta, finish_reason }]
 })
 function sse(chunks: unknown[], done = true): Response {
@@ -54,7 +54,7 @@ test('OpenRouter sends authenticated free-model requests and assembles UTF-8 SSE
         'Привет <:sanich:111111111111111111>')
     assert.equal(url, 'https://openrouter.ai/api/v1/chat/completions')
     assert.equal(headers!.get('Authorization'), 'Bearer test-key-not-a-secret')
-    assert.equal(request.model, 'nvidia/nemotron-3-ultra-550b-a55b:free')
+    assert.equal(request.model, 'nvidia/nemotron-3.5-super-vl:free')
     assert.equal(request.stream, true)
     assert.ok(request.max_tokens > 0 && request.max_tokens <= 650)
     assert.equal(request.reasoning.enabled, false)

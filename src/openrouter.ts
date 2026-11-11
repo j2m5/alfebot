@@ -2,7 +2,7 @@ import type { ModelMessage, ModelToolCall, ModelTurn } from './model-types.js'
 import type { ToolDefinition } from './tool-types.js'
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions'
-const DEFAULT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+const DEFAULT_MODEL = 'nvidia/nemotron-3.5-super-vl:free'
 const INCOMPLETE_TOOL = 'Не удалось получить законченный запрос к инструменту. Действие не выполнялось.'
 
 function apiMessages(messages: readonly ModelMessage[]) {
@@ -42,7 +42,7 @@ async function request(
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Title': 'Alfebot' },
         body: JSON.stringify({
             model: process.env.OPENROUTER_MODEL?.trim() || DEFAULT_MODEL,
-            messages: apiMessages(messages), stream, max_tokens: maxTokens,
+            messages: apiMessages(messages), stream, max_tokens: maxTokens, temperature: 0.6,
             reasoning: { enabled: false, exclude: true },
             ...(tools.length ? { tools: tools.map(tool => ({ type: 'function', function: {
                 name: tool.name, description: tool.description, parameters: tool.inputSchema
