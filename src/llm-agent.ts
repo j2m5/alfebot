@@ -23,6 +23,7 @@ export async function runToolConversation(
         }
         if (!turn.complete) return 'Не удалось получить законченный ответ модели. Действие не выполнялось.'
         if (!turn.toolCalls.length) {
+            if (turn.content.trim() === 'DECLINE_CONTENT') return 'Модель отказалась выполнять эту просьбу из-за содержания сообщения. Действие не выполнено.'
             if (round === 0 && answerWithoutTools) {
                 signal.throwIfAborted()
                 return answerWithoutTools()

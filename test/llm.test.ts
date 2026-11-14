@@ -48,6 +48,7 @@ test('инструменты доступны только чату с дове�
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'set_member_role'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'create_poll'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'create_thread'))
+    assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'notify_member'))
     assert.equal(requests[1].tools, undefined) // обычный ответ после короткого выбора режима
     assert.equal(requests[2].tools, undefined) // /play
     assert.equal(requests[3].tools, undefined) // вызов без контекста инструментов
@@ -81,8 +82,8 @@ test('tool selection has a small isolated prompt; ordinary response retains pers
     assert.ok(!JSON.stringify(planning.messages).includes('BACKGROUND_MARKER'))
     assert.ok(!JSON.stringify(planning.messages).includes('DIRECTORY_MARKER'))
     assert.ok(!planning.messages[0].content.includes('<:sanich:'))
-    assert.ok(planning.messages.some((message: any) => message.content === 'Обсуждали игру'))
-    assert.ok(planning.tools.length === 9)
+    assert.ok(planning.messages.slice(1, -1).some((message: any) => JSON.parse(message.content).past_turn.content === 'Обсуждали игру'))
+    assert.ok(planning.tools.length === 10)
     assert.equal(final.tools, undefined)
     assert.ok(final.messages[0].content.includes('TEST_PERSONALITY_ONLY'))
     assert.ok(final.messages[0].content.includes('<:sanich:111111111111111111>'))
@@ -124,7 +125,7 @@ test('reminders join native tool catalog and short prompt includes the actual Mo
         replyMessageId: '666666666666666666', replyUserId: '777777777777777777' }
     assert.equal(await askModel(ctx.requestText, [], undefined, [], 'chat', ctx), 'Напоминаний пока нет.')
     assert.equal(requests.length, 2)
-    assert.equal(requests[0].tools.length, 12)
+    assert.equal(requests[0].tools.length, 13)
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'create_reminder'))
     assert.ok(requests[0].tools.some((tool: any) => tool.function.name === 'cancel_reminder'))
     assert.match(requests[0].messages[0].content, /2026-11-10 00:30:00/)
@@ -148,17 +149,29 @@ test('tool context retains only complete recent dialogue turns and preserves the
     assert.equal(messages.at(-1)?.content, prompt)
     assert.ok(retained.length > 0 && retained.length < history.length)
     assert.ok(retained.reduce((size, message) => size + message.content.length, 0) <= 3600)
-    assert.deepEqual(retained, history.slice(-retained.length))
-    assert.ok(retained.every(message => JSON.parse(message.content).userId === context.actorId))
+    assert.deepEqual(retained.map(message => JSON.parse(message.content).past_turn), history.slice(-retained.length))
+    assert.ok(retained.every(message => JSON.parse(JSON.parse(message.content).past_turn.content).userId === context.actorId))
     assert.ok(messages[0].content.length < 2200)
     assert.ok(messages[0].content.includes(context.replyMessageId))
     assert.ok(messages[0].content.includes(context.replyUserId))
 })
 
+test('planner receives prior assistant capability claims as quoted data, not its own live statements', () => {
+    const history = [
+        { role: 'user' as const, content: 'Передай Alice привет' },
+        { role: 'assistant' as const, content: 'Я не умею пинговать и передавать сообщения.' }
+    ]
+    const messages = toolMessages('Пингани Alice', history, {} as any)
+    const quoted = messages.slice(1, -1)
+    assert.ok(quoted.every(message => message.role === 'user'))
+    assert.deepEqual(quoted.map(message => JSON.parse(message.content).past_turn), history)
+    assert.equal(messages.at(-1)!.content, 'Пингани Alice')
+})
+
 test('tool context limits short dialogue history to eight latest turns', () => {
     const history = Array.from({ length: 20 }, (_, i) => ({ role: 'user' as const, content: `Turn ${i}` }))
     const messages = toolMessages('Now', history, {} as any)
-    assert.deepEqual(messages.slice(1, -1), history.slice(-8))
+    assert.deepEqual(messages.slice(1, -1).map(message => JSON.parse(message.content).past_turn), history.slice(-8))
 })
 
 test('история передаётся перед текущим вопросом, а обычный ask остаётся без истории', async (t) => {

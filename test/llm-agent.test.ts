@@ -60,6 +60,20 @@ test('no-tool decision delegates to ordinary chat once and discards speculative 
     assert.equal(executions, 0)
 })
 
+test('content refusal is reported directly instead of inventing missing Discord capabilities', async t => {
+    let fallbackCalls = 0, executions = 0
+    const session: ToolSession = { definitions, close: async () => {}, call: async () => {
+        executions++; return { ok: true, message: 'Готово' }
+    } }
+    t.mock.method(globalThis, 'fetch', async () => textTurn('DECLINE_CONTENT'))
+    const answer = await runToolConversation(messages, session, signal(), async () => {
+        fallbackCalls++; return 'Не умею пинговать.'
+    })
+    assert.match(answer, /модель.*содержани/iu)
+    assert.equal(fallbackCalls, 0)
+    assert.equal(executions, 0)
+})
+
 test('planner abort prevents a second chat request', async (t) => {
     const controller = new AbortController()
     let fallbackCalls = 0

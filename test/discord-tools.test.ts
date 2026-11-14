@@ -4,6 +4,10 @@ import { ChannelType, PermissionFlagsBits as P, Routes } from 'discord.js'
 import { createDiscordTools } from '../src/discord-tools.js'
 import type { DiscordToolContext } from '../src/tool-types.js'
 import { createToolRest } from '../src/tool-rest.js'
+import { askModel } from '../src/llm.js'
+import { modelToolResponse, useTestModelKey } from './helpers/model-response.js'
+
+useTestModelKey()
 
 const G = '100000000000000001', C = '100000000000000002'
 const A = '100000000000000003', B = '100000000000000004', T = '100000000000000005'
@@ -49,7 +53,8 @@ function fixture(text = `timeout <@${T}> for 5 minutes`) {
         throw Object.assign(new Error('sensitive network detail'), { status: 404 })
     }]))
     const context: DiscordToolContext = { rest, guildId: G, channelId: C, actorId: A, botId: B, requestId: REQUEST, requestText: text }
-    return { context, roles, members, guild, channel, calls, hook(fn: typeof hook) { hook = fn }, writes: () => calls.filter(c => c.method !== 'get'), backend: () => createDiscordTools(context) }
+    return { context, roles, members, guild, channel, calls, hook(fn: typeof hook) { hook = fn }, writes: () => calls.filter(c => c.method !== 'get'),
+        backend: () => createDiscordTools(context, [{ userId: T, names: ['начальник', 'начальника', 'начальнику'] }]) }
 }
 
 function creationFixture(text = POLL_REQUEST) {
@@ -61,6 +66,212 @@ function creationFixture(text = POLL_REQUEST) {
     })
     return f
 }
+
+function notificationFixture(text = `Пингани <@${T}> и скажи ему, что мы ждём его в игре`) {
+    const f = fixture(text)
+    f.members.get(A)!.roles = [AR] // Notifications are not moderation.
+    f.hook((method, route, options) => {
+        if (method === 'post') return { id: MESSAGE, channel_id: C, content: options.body.content, author: { id: B } }
+    })
+    return f
+}
+
+test('notification sends one real mention and the requested message in the current channel', async () => {
+    const f = notificationFixture(), backend = f.backend()
+    const result = await backend.execute('notify_member', { userId: T, message: 'Мы ждём тебя в игре!' }, signal())
+    assert.equal(result.ok, true, result.message)
+    assert.equal(result.changed, true)
+    assert.match(result.message, new RegExp(`https://discord.com/channels/${G}/${C}/${MESSAGE}`))
+    const write = f.writes()[0]
+    assert.equal(write.route, Routes.channelMessages(C))
+    assert.deepEqual(write.options.body, { content: `<@${T}> Мы ждём тебя в игре!`,
+        allowed_mentions: { parse: [], users: [T], replied_user: false }, nonce: REQUEST, enforce_nonce: true })
+    assert.equal((await backend.execute('notify_member', { userId: T }, signal())).ok, false)
+    assert.equal(f.writes().length, 1)
+})
+
+test('model can find a member then ping through MCP without a second generated success claim', async t => {
+    const f = notificationFixture('Пингани Alice и скажи, что пора играть')
+    let requests = 0
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+        const body = JSON.parse(String(options!.body))
+        assert.ok(body.tools.some((tool: any) => tool.function.name === 'notify_member'))
+        if (++requests === 1) return modelToolResponse('get_member', { query: 'Alice' })
+        assert.ok(body.messages.some((message: any) => message.role === 'tool' && message.content.includes(T)))
+        return modelToolResponse('notify_member', { userId: T, message: 'Пора играть!' })
+    })
+    const answer = await askModel(f.context.requestText, [], signal(), [], 'chat', f.context)
+    assert.match(answer, /Сообщение с упоминанием участника отправлено/)
+    assert.equal(requests, 2)
+    assert.equal(f.writes().length, 1)
+    assert.equal(f.writes()[0].options.body.content, `<@${T}> Пора играть!`)
+})
+
+test('notifications understand polite requests, exact names, mentions, self and a trusted reply', async () => {
+    for (const [text, userId] of [
+        ['Алфе, можешь пингануть Alice и сказать ему, что пора играть?', T],
+        [`<@${B}> позови <@!${T}> играть`, T],
+        [`Если несложно, пингани ${T}`, T],
+        ['Пингани меня', A], ['Пингани его и скажи, что пора', T],
+        ['Передай Alice, что я не смогу сегодня', T],
+        ['Пингани Alice, пожалуйста', T],
+        ['Пингани Alice, плиз!', T],
+        ['Пингани Alice и спроси, не занят ли он?', T],
+        ['Пингани начальника и скажы ему, что мы собрались играть', T],
+        ['Пингани Alice и сообщи ему, что мы ждём', T],
+        ['Пингани Alice и поинтересуйся, когда он освободится', T],
+        ['Пингани Alice и задай ему вопрос: не занят ли он?', T],
+        ['Пингани Alice и спроси, когда он освободится?', T],
+        ['Пингани Alice и узнай, играет ли он сейчас', T],
+        ['Спроси у Alice, не занят ли он?', T],
+        ['Можешь Alice пингануть и спросить, не занят ли он?', T],
+        ['Напиши Alice: «Если сможешь, ответь мне?»', T],
+        [`Ты можешь пингануть <@${T}>?`, T],
+        [`Можешь позвать сюда <@${T}>?`, T],
+        [`Передай привет <@${T}>`, T],
+        ['Пингани Alice и скажи, что если он сможет, пусть напишет мне в личку завтра', T]
+    ]) {
+        const f = notificationFixture(text)
+        f.context.replyUserId = T; f.context.replyMessageId = MESSAGE
+        const result = await f.backend().execute('notify_member', { userId }, signal())
+        assert.equal(result.ok, true, `${text}: ${result.message}`)
+        assert.equal(f.writes()[0].options.body.content, `<@${userId}>`)
+    }
+})
+
+test('notification message mentions cannot expand the notification audience', async () => {
+    const f = notificationFixture()
+    const message = `@everyone @here <@&${AR}> <@${A}> ждут тебя`
+    assert.equal((await f.backend().execute('notify_member', { userId: T, message }, signal())).ok, true)
+    assert.deepEqual(f.writes()[0].options.body.allowed_mentions, { parse: [], users: [T], replied_user: false })
+})
+
+test('notification cannot target someone from payload, history, a capability question or a negated request', async () => {
+    for (const text of [
+        `Не пингуй <@${T}>`, `Умеешь пинговать <@${T}>?`,
+        `Если завтра придёт Alice, пингани <@${T}>`, `«Пингани <@${T}>»`,
+        `Объясни, как пингануть <@${T}>`, 'Привет!',
+        `Пингани <@${A}> и передай привет <@${T}>`,
+        `Пингани <@${T}> и <@${A}>`, `Пингани @everyone`,
+        `Пингани его`, `Пингани Alice.Bob`,
+        `Пингани <@${T}> если он завтра придёт`,
+        `Пингани <@${T}>, но не сейчас`, `Пингани <@${T}> завтра`,
+        `Напиши <@${T}>: в личку, пожалуйста`,
+        `Пингани <@${T}> и скажи ему в личку, что пора играть`,
+        `Пингани <@${T}> в другой канал`, `Пингани <@${T}> в <#${A}>`,
+        `Пингани <@${T}> <@${A}>`, 'Пингани Alice, Bob',
+        `Спроси <@${T}>, в личку, не занят ли он?`,
+        `Пингани <@${T}> и спроси его в личку, не занят ли он?`,
+        `Пингани <@${T}> и спроси завтра, не занят ли он?`,
+        `Спроси <@${T}>, завтра, не занят ли он?`,
+        `Пингани <@${T}> и скажы ему в личку, что мы ждём`,
+        `Пингани <@${T}> и поинтересуйся завтра, когда он освободится`,
+        `Пингани <@${T}> и скажы ему, в личку, что мы ждём`,
+        `Пингани <@${T}> и только когда он будет онлайн`,
+        `Пингани <@${T}> и скажы ему, но не пингани сейчас`
+    ]) {
+        const f = notificationFixture(text)
+        if (text === 'Пингани Alice, Bob') f.members.get(A)!.user.username = 'Bob'
+        const result = await f.backend().execute('notify_member', { userId: T }, signal())
+        assert.equal(result.ok, false, text)
+        assert.equal(f.writes().length, 0, text)
+    }
+})
+
+test('notification names must resolve uniquely even when model supplies a valid user ID', async () => {
+    const f = notificationFixture('Пингани Alice')
+    f.members.get(A)!.nick = 'Alice'
+    const result = await f.backend().execute('notify_member', { userId: T }, signal())
+    assert.equal(result.ok, false)
+    assert.match(result.message, /неоднозначно/)
+    assert.equal(f.writes().length, 0)
+})
+
+test('an explicit recipient with ordinary message prose is not rejected at the member-page limit', async () => {
+    const f = notificationFixture(`Пингани <@${T}> и скажы ему, что пора играть`)
+    const members = Array.from({ length: 1000 }, (_, index) => member(String(100000000000100000n + BigInt(index))))
+    f.hook((method, route, options) => {
+        if (method === 'get' && route === Routes.guildMembers(G)) return members
+        if (method === 'post') return { id: MESSAGE, channel_id: C, content: options.body.content, author: { id: B } }
+    })
+    const result = await f.backend().execute('notify_member', { userId: T, message: 'Пора играть' }, signal())
+    assert.equal(result.ok, true, result.message)
+    assert.equal(f.writes().length, 1)
+})
+
+test('server alias resolves the agreed primary account instead of selecting among role holders', async () => {
+    const f = notificationFixture('Пингани начальника и спроси, не занят ли он?')
+    f.roles.find(role => role.id === TR)!.name = 'Начальник'
+    f.members.get(A)!.roles.push(TR) // Same role also exists on another account.
+    const backend = f.backend()
+    const found = await backend.execute('get_member', { query: 'начальника' }, signal())
+    assert.equal(found.ok, true, found.message)
+    assert.equal((found.data as any).entries.length, 1)
+    assert.equal((found.data as any).entries[0].id, T)
+    const result = await backend.execute('notify_member', { userId: T, message: 'Ты сейчас не занят?' }, signal())
+    assert.equal(result.ok, true, result.message)
+    assert.equal(f.writes()[0].options.body.content, `<@${T}> Ты сейчас не занят?`)
+    assert.ok(!f.calls.some(call => call.route === Routes.guildMembersSearch(G)))
+})
+
+test('a server alias cannot authorize another account or bypass guild membership', async () => {
+    const f = notificationFixture('Пингани начальника')
+    assert.equal((await f.backend().execute('notify_member', { userId: A }, signal())).ok, false)
+    assert.equal(f.writes().length, 0)
+    f.members.delete(T)
+    assert.equal((await f.backend().execute('get_member', { query: 'начальник' }, signal())).ok, false)
+    assert.equal((await f.backend().execute('notify_member', { userId: T }, signal())).ok, false)
+    assert.equal(f.writes().length, 0)
+})
+
+test('notification requires caller and bot send permission plus target channel access', async () => {
+    for (const [who, deny] of [[A, P.SendMessages], [B, P.SendMessages], [T, P.ViewChannel]] as const) {
+        const f = notificationFixture()
+        f.channel.permission_overwrites.push({ id: who, type: 1, allow: '0', deny: String(deny) })
+        assert.equal((await f.backend().execute('notify_member', { userId: T }, signal())).ok, false)
+        assert.equal(f.writes().length, 0)
+    }
+})
+
+test('notification rechecks permissions immediately before posting and cannot ping nonmembers', async () => {
+    const f = notificationFixture()
+    let reads = 0
+    f.hook((method, route) => {
+        if (method === 'get' && route === Routes.channel(C) && ++reads === 2)
+            return { ...f.channel, permission_overwrites: [{ id: A, type: 1, allow: '0', deny: String(P.SendMessages) }] }
+    })
+    assert.equal((await f.backend().execute('notify_member', { userId: T }, signal())).ok, false)
+    assert.equal(f.writes().length, 0)
+    const missing = notificationFixture()
+    missing.members.delete(T)
+    assert.equal((await missing.backend().execute('notify_member', { userId: T }, signal())).ok, false)
+    assert.equal(missing.writes().length, 0)
+})
+
+test('notification validates message length and prevents destination or permission overrides', async () => {
+    for (const extra of [{ message: 'x'.repeat(1801) }, { channelId: A }, { allowed_mentions: { parse: ['everyone'] } }, { actorId: B }]) {
+        const f = notificationFixture()
+        assert.equal((await f.backend().execute('notify_member', { userId: T, ...extra }, signal())).ok, false)
+        assert.equal(f.writes().length, 0)
+    }
+})
+
+test('notification does not retry an uncertain post or claim success for a wrong receipt', async () => {
+    for (const receipt of ['network', 'wrong_channel', 'wrong_content']) {
+        const f = notificationFixture(), backend = f.backend()
+        f.hook((method, _route, options) => {
+            if (method !== 'post') return
+            if (receipt === 'network') throw new Error('lost response')
+            return { id: MESSAGE, channel_id: receipt === 'wrong_channel' ? A : C,
+                content: receipt === 'wrong_content' ? 'another action with same nonce' : options.body.content, author: { id: B } }
+        })
+        const result = await backend.execute('notify_member', { userId: T }, signal())
+        assert.equal(result.ok, false)
+        assert.equal(result.uncertain, true)
+        await backend.execute('notify_member', { userId: T }, signal())
+        assert.equal(f.writes().length, 1)
+    }
+})
 
 test('poll uses native Discord payload, fixed current channel, safe mentions and default settings', async () => {
     const f = creationFixture(), backend = f.backend()
@@ -307,10 +518,10 @@ test('moderation role is checked in refreshed snapshot and read/creation tools r
     assert.equal((await creationFixture(THREAD_REQUEST).backend().execute('create_thread', THREAD_ARGS, signal())).ok, true)
 })
 
-test('all nine definitions have strict JSON schemas and mutation flags; forged authority is rejected before REST', async () => {
+test('all Discord definitions have strict JSON schemas and mutation flags; forged authority is rejected before REST', async () => {
     const f = fixture(), backend = f.backend()
-    assert.deepEqual(backend.definitions.map(d => d.name).sort(), ['create_poll', 'create_thread', 'delete_message', 'get_member', 'get_permissions', 'list_roles', 'set_member_role', 'set_nickname', 'set_timeout'])
-    for (const d of backend.definitions) { assert.equal(d.inputSchema.type, 'object'); assert.equal(d.inputSchema.additionalProperties, false); assert.equal(d.mutating, /^(set_|delete_|create_)/.test(d.name)) }
+    assert.deepEqual(backend.definitions.map(d => d.name).sort(), ['create_poll', 'create_thread', 'delete_message', 'get_member', 'get_permissions', 'list_roles', 'notify_member', 'set_member_role', 'set_nickname', 'set_timeout'])
+    for (const d of backend.definitions) { assert.equal(d.inputSchema.type, 'object'); assert.equal(d.inputSchema.additionalProperties, false); assert.equal(d.mutating, /^(set_|delete_|create_|notify_)/.test(d.name)) }
     for (const extra of [{ actorId: A }, { guildId: G }, { authorized: true }, { channelId: C }]) {
         assert.equal((await backend.execute('set_timeout', { userId: T, minutes: 5, ...extra }, signal())).ok, false)
     }

@@ -3,6 +3,7 @@ import { ChannelType, PermissionFlagsBits as P, PermissionsBitField, Routes, Rat
 import { z } from 'zod'
 import type { DiscordToolContext, ToolBackend, ToolDefinition, ToolOutcome } from './tool-types.js'
 import { creationSchemas, CreationDenied, resolveCreationSource, type CreationName } from './discord-create.js'
+import { SERVER_MEMBER_ALIASES, type MemberAlias } from './member-aliases.js'
 
 const EMPLOYEE = '1242979048917831763'
 const MODERATOR_ROLES = ['1242978551154868326', '1278077913899597936']
@@ -18,6 +19,7 @@ const schemas = {
         .refine(a => !(a.userId && a.query), 'Specify userId or query, not both'),
     list_roles: z.strictObject({}),
     get_permissions: z.strictObject({ userId: id.optional(), channelId: id.optional() }),
+    notify_member: z.strictObject({ userId: id, message: z.string().trim().max(1800).optional() }),
     set_nickname: z.strictObject({ userId: id, nickname: z.string().min(1).max(32).nullable() }),
     set_timeout: z.strictObject({ userId: id, minutes: z.number().int().min(0).max(40320) }),
     delete_message: z.strictObject({ messageId: z.union([id, z.string().max(200).regex(MESSAGE_LINK)]).optional() }),
@@ -27,9 +29,10 @@ type Name = keyof typeof schemas
 const descriptions: Record<Name, string> = {
     create_poll: 'Create a poll here: question <=300 chars, 2–10 answers <=55 chars. Extract natural-language parameters; preserve answers/order. Infer wording from a clear topic. durationHours: integer 1–768, default 24. allowMultiselect: default false.',
     create_thread: 'Create a public thread here, name <=100 chars; infer from topic. Standalone by default: fromReply=false, omit messageId. Attach only when requested: messageId (current ID/link) OR fromReply=true (actual reply), never both. Auto archive 24h; no starter message.',
-    get_member: 'Read member by userId (default caller), or search username/nickname prefix with query. Multiple matches need clarification.',
+    get_member: 'Read member by userId (default caller), or search username/nickname prefix with query. Also resolves configured server aliases: начальник/начальника means the primary account of that person, not a role ping. Multiple matches need clarification.',
     list_roles: 'Read guild roles, explicit permission grants and completeness flag.',
     get_permissions: 'Read effective text-channel permissions for userId (default caller) and bot; channelId defaults to here.',
+    notify_member: 'Ping one explicitly requested guild member HERE and optionally deliver a message (<=1800 chars). userId from a mention, trusted reply, or get_member lookup; never invent IDs. message is addressed to the recipient, not a completion report; omit for a bare ping. No DMs, other channels, roles or mass pings.',
     set_nickname: 'Set member nickname (1–32 chars); null clears. Current request must explicitly bind target and nickname.',
     set_timeout: 'Set member timeout in integer minutes (0 clears, max 40320). Current request must explicitly bind target and duration.',
     delete_message: 'Delete one message here by explicit ID/link, or omit messageId for explicitly requested reply deletion. Cannot delete invocation.',
@@ -37,12 +40,14 @@ const descriptions: Record<Name, string> = {
 }
 const definitions: readonly ToolDefinition[] = Object.freeze((Object.keys(schemas) as Name[]).map(name => Object.freeze({
     name, description: descriptions[name], inputSchema: z.toJSONSchema(schemas[name]) as ToolDefinition['inputSchema'],
-    mutating: name.startsWith('set_') || name.startsWith('create_') || name === 'delete_message'
+    mutating: name.startsWith('set_') || name.startsWith('create_') || name === 'delete_message' || name === 'notify_member'
 })))
 
-class Denied extends Error {}
-function requireThat(condition: unknown, message: string): asserts condition {
-    if (!condition) throw new Denied(message)
+class Denied extends Error {
+    constructor(message: string, readonly code?: string) { super(message) }
+}
+function requireThat(condition: unknown, message: string, code?: string): asserts condition {
+    if (!condition) throw new Denied(message, code)
 }
 type Member = APIGuildMember & { user: NonNullable<APIGuildMember['user']> }
 type Channel = APIChannel & { guild_id: string; permission_overwrites: { id: string; type: number; allow: string; deny: string }[] }
@@ -142,6 +147,58 @@ function names(member: Member): string[] {
     return [...new Set([member.user.username, member.user.global_name, member.nick].filter((s): s is string => !!s && s.trim().length >= 2))]
 }
 
+// Separate the addressee from the delivered text: "скажи ему, что я жду тебя"
+// must not rebind the recipient to the caller or the author of a reply.
+function notificationCommand(text: string, botId: string): { text: string; question: boolean } {
+    let command = text.trim().replace(new RegExp(`^<@!?${botId}>[,:]?\\s*`), '')
+    command = command.replace(/^(?:алф[еёа]|бот)[,:]?\s+/iu, '')
+    command = command.replace(/^(?:если\s+(?:не\s?сложно|не\s?трудно|можешь)|if possible)[, ]+/iu, '')
+    command = command.replace(/^(?:пожалуйста[, ]+|please[, ]+)?(?:(?:ты\s+)?(?:можешь|можеш|можно)(?: ли)?(?: ты)?\s+|(?:can|could|would) you\s+|давай\s+)?(?:пожалуйста[, ]+)?/iu, '')
+    const action = command.match(/(?:^|\s)(пингани|пингануть|пингни|пингнуть|пингуй|пинганите|тегни|тегнуть|упомяни|упомянуть|позови|позвать|передай|передать|скажи|сказать|напиши|написать|спроси|спросить|узнай|узнать|ping|mention|notify|tell|ask)(?!\p{L})\s*/iu)
+    requireThat(action, 'Для пинга попроси позвать участника или передать ему сообщение: например, «пингани @участник и скажи, что пора играть».', 'notification_request')
+    const before = command.slice(0, action.index).trim()
+    const after = command.slice(action.index! + action[0].length).replace(/^(?:пожалуйста[, ]+)?(?:(?:сюда|здесь|привет|у)\s+)?(?:(?:участника|пользователя)\s+)?/iu, '')
+    return { text: [before, after].filter(Boolean).join(' '), question: /^(?:спрос|узна|ask)/iu.test(action[1]) }
+}
+
+function notificationRecipient(command: string, target: Member, aliases: readonly string[]): { recipient: string; tail: string } {
+    const tokens = [`<@${target.user.id}>`, `<@!${target.user.id}>`, target.user.id,
+        ...aliases, ...names(target), 'меня', 'мне', 'себя', 'себе', 'его', 'ему', 'её', 'ее', 'ей', 'автору', 'me', 'myself']
+        .sort((a, b) => b.length - a.length)
+    const recipient = tokens.find(token => command.toLocaleLowerCase().startsWith(token.toLocaleLowerCase()) &&
+        !/^[\p{L}\p{N}\p{M}\p{Cf}_.-]/u.test(command.slice(token.length)))
+    requireThat(recipient, 'Не удалось однозначно связать получателя с текущей просьбой. Укажи участника упоминанием, точным именем или ответь на его сообщение.', 'notification_target')
+    return { recipient, tail: command.slice(recipient.length).trim() }
+}
+
+function assertNotificationDelivery(tail: string, question: boolean): void {
+    // Audience detection is separate. Arbitrary message wording (including a
+    // misspelled verb) never becomes evidence of another recipient.
+    const continuation = /^(?:,\s*)?(?:и|and)\s+/iu.test(tail)
+    const content = tail.replace(/^[,\s]+/u, '').replace(/^(?:и|and)\s+/iu, '')
+    const controlPrefix = /^(?:(?:но|только|пожалуйста|лучше)[,\s]+)*(?:в\s+(?:личку|лс|личные сообщения|другой канал|<#)|dm|завтра|потом|позже|через\s+\d|не\s+(?:сейчас|надо|нужно|пиши|отправляй|пингани|пингуй)|пока\s+не|если|if|later)(?!\p{L})/iu
+    const boundaries = [content.search(/[«“"`:]|(?<!\p{L})(?:что|чтобы|чтоб)(?!\p{L})/iu)]
+    if (continuation || question) {
+        boundaries.push(content.indexOf(','))
+        // An indirect question is payload; a condition without a preceding
+        // delivery phrase remains an instruction ("и когда ...").
+        const indirect = content.search(/(?<!\p{L})(?:когда|как|почему|зачем|где)(?!\p{L})/iu)
+        if (question || indirect > 0) boundaries.push(indirect)
+    }
+    const boundary = Math.min(...boundaries.filter(index => index >= 0))
+    let instructions = Number.isFinite(boundary) ? content.slice(0, boundary) : content
+    if (controlPrefix.test(content) || /^(?:только|лишь)\s+(?:когда|если)(?!\p{L})/iu.test(content)) instructions = content
+    else if (Number.isFinite(boundary) && /[:,]/u.test(content[boundary])) {
+        const nextClause = content.slice(boundary + 1).trim()
+        if (controlPrefix.test(nextClause)) instructions += ` ${nextClause}`
+    }
+    const destination = /(?:<#[1-9]\d{16,19}>|(?<!\p{L})(?:в\s+(?:личку|лс|личные сообщения|другой канал)|dm)(?!\p{L}))/iu
+    requireThat(!destination.test(instructions),
+        'Могу позвать участника только в текущем канале. Личные сообщения и отправка в другой канал не поддерживаются.', 'notification_destination')
+    requireThat(!/(?<!\p{L})(?:если|когда|потом|позже|завтра|через\s+\d|не\s+(?:сейчас|надо|нужно|пингуй|пингани|пиши|отправляй)|пока\s+не|if|when|later)(?!\p{L})/iu.test(instructions),
+        'Сейчас не отправляю: в просьбе есть условие, отсрочка или отмена. Для немедленного пинга попроси позвать участника сейчас.', 'notification_deferred')
+}
+
 // A deliberately conservative command grammar. Model/history text never enters this function.
 function directCommand(text: string, botId: string): string {
     requireThat(!/[\n\r`?？]/.test(text), 'Для изменения нужна одна прямая команда в текущем сообщении. Вопрос о возможностях не разрешает действие.')
@@ -201,9 +258,11 @@ function actionIntent(name: Name, args: Record<string, unknown>, command: string
     return command
 }
 
-export function createDiscordTools(context: DiscordToolContext): ToolBackend {
+export function createDiscordTools(context: DiscordToolContext, memberAliases: readonly MemberAlias[] = SERVER_MEMBER_ALIASES): ToolBackend {
     // Copy trusted event fields: later caller changes cannot rebind an existing session.
     const ctx = Object.freeze({ ...context })
+    const aliases = memberAliases.map(alias => ({ userId: alias.userId, names: [...alias.names] }))
+    const aliasId = (query: string): string | undefined => aliases.find(alias => alias.names.some(name => name.toLocaleLowerCase() === query.trim().toLocaleLowerCase()))?.userId
     let mutationAttempted = false
 
     async function rest<T>(method: 'get' | Write['method'], route: `/${string}`, signal: AbortSignal, body?: unknown, query?: URLSearchParams): Promise<T> {
@@ -266,7 +325,7 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
         const explicit = [...new Set([...mentions, ...bareIds])]
         requireThat(explicit.length <= 1 && explicit.every(v => v === targetId), 'Текущая команда указывает другого участника или неоднозначную цель.')
         const self = /(?:\b(?:me|my|myself)\b|(?<!\p{L})(?:мне|меня|мой|себе|себя)(?!\p{L}))/iu.test(command)
-        const replied = /(?:\breplied\b|\breply\b|(?<!\p{L})(?:ему|её|ее|его|автору|ответ|репла)[\p{L}]*)/iu.test(command)
+        const replied = /(?:\breplied\b|\breply\b|(?<!\p{L})(?:ему|её|ее|ей|его|автору|ответ|репла)[\p{L}]*)/iu.test(command)
         if (self) { requireThat(targetId === ctx.actorId && !replied, 'Ссылка на себя не соответствует выбранному участнику.'); return undefined }
         if (replied) { requireThat(ctx.replyUserId === targetId, 'Выбранный участник не совпадает с автором сообщения, на которое вы отвечаете.'); return undefined }
         if (explicit.length === 1) return undefined
@@ -279,6 +338,23 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
         const matching = members.filter(m => names(m as Member).some(n => hasName(command, n)))
         requireThat(matching.length === 1 && matching[0].user?.id === targetId, 'Имя участника неоднозначно. Используйте упоминание или ID.')
         return literal[0]
+    }
+    async function rejectAdditionalRecipients(tail: string, targetId: string, signal: AbortSignal): Promise<void> {
+        const list = tail.match(/^(?:,\s*(?:(?:и|или|and|or)\s+)?|(?:и|или|and|or)\s+)(.*)$/iu)
+        const next = list ? list[1].trim() : tail
+        requireThat(!/^(?:<@(?:!|&)?\d+>|@(?:everyone|here)(?!\p{L})|[1-9]\d{16,19}(?!\d))/iu.test(next),
+            'За один запрос можно позвать одного участника; уточни, кого именно.', 'notification_recipients')
+        if (!list || !next || /^[«“"`:]/u.test(next)) return
+        const members = await rest<APIGuildMember[]>('get', Routes.guildMembers(ctx.guildId), signal, undefined, new URLSearchParams({ limit: String(NAME_SCAN_LIMIT) }))
+        requireThat(Array.isArray(members) && members.every(member => member.user && Array.isArray(member.roles)),
+            'Не удалось прочитать сведения об участниках для проверки получателя.')
+        // This is positive evidence of a second recipient, never proof that an
+        // arbitrary word is one. A full page cannot disqualify ordinary prose.
+        // Primary-name uniqueness is checked separately by bindMember.
+        const references = [...members.filter(member => member.user!.id !== targetId).flatMap(member => names(member as Member)),
+            ...aliases.filter(alias => alias.userId !== targetId).flatMap(alias => alias.names)]
+        const second = references.some(name => next.toLocaleLowerCase().startsWith(name.toLocaleLowerCase()) && hasName(next, name))
+        requireThat(!second, 'За один запрос можно позвать одного участника; уточни, кого именно.', 'notification_recipients')
     }
     function messageTarget(value: string | undefined, command: string): string {
         let messageId = value
@@ -314,9 +390,17 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
         }
         // Channel overwrites apply to message operations. They cannot grant
         // guild-level moderation, nickname or role authority to a caller.
-        const channelAction = name === 'delete_message' || name.startsWith('create_')
+        const channelAction = name === 'delete_message' || name.startsWith('create_') || name === 'notify_member'
         const actorPerms = channelAction ? effective(state.actor, state) : guildPermissions(state.actor, state)
         const botPerms = channelAction ? effective(state.bot, state) : guildPermissions(state.bot, state)
+        if (name === 'notify_member') {
+            need(actorPerms, P.SendMessages, 'Caller', 'SendMessages'); need(botPerms, P.SendMessages, 'Bot', 'SendMessages')
+            requireThat(effective(state.target!, state) & P.ViewChannel, 'Участник не видит этот канал; сообщение ему здесь не отправлено.')
+            return { method: 'post', route: Routes.channelMessages(ctx.channelId), body: {
+                content: `<@${args.userId}>${args.message ? ` ${args.message}` : ''}`,
+                allowed_mentions: { parse: [], users: [args.userId], replied_user: false }, nonce: ctx.requestId, enforce_nonce: true
+            } }
+        }
         if (name === 'create_poll') {
             for (const [permissions, who] of [[actorPerms, 'Caller'], [botPerms, 'Bot']] as const) {
                 need(permissions, P.SendMessages, who, 'SendMessages'); need(permissions, P.SendPolls, who, 'SendPolls')
@@ -372,6 +456,7 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
     return { definitions, async execute(rawName, rawArgs, signal): Promise<ToolOutcome> {
         let writeStarted = false
         let targetId: string | undefined
+        let reasonCode: string | undefined
         let outcome: ToolOutcome
         const name = Object.hasOwn(schemas, rawName) ? rawName as Name : undefined
         try {
@@ -382,13 +467,18 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
             const args = parsed.data as Record<string, any>
             targetId = args.userId
             const creating = name.startsWith('create_')
-            const mutating = name.startsWith('set_') || creating || name === 'delete_message'
+            const mutating = name.startsWith('set_') || creating || name === 'delete_message' || name === 'notify_member'
             requireThat(!mutating || !mutationAttempted, 'На один запрос разрешена одна попытка изменения; она уже использована. Повтора не будет.')
             for (const value of [ctx.guildId, ctx.channelId, ctx.actorId, ctx.botId, ctx.requestId]) requireThat(id.safeParse(value).success, 'Некорректный доверенный контекст запроса Discord.')
             let command = ''
+            let notificationQuestion = false
             if (creating) {
                 args.messageId = resolveCreationSource(name as CreationName, args, ctx)
                 targetId = args.messageId ?? ctx.channelId
+            } else if (name === 'notify_member') {
+                const notification = notificationCommand(ctx.requestText, ctx.botId)
+                command = notification.text
+                notificationQuestion = notification.question
             } else if (mutating) {
                 command = directCommand(ctx.requestText, ctx.botId)
                 command = actionIntent(name, args, command)
@@ -400,7 +490,12 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
                     bitfield: r.permissions, permissions: new PermissionsBitField(bits(r.permissions)).toArray() })), ROLE_LIMIT)
                 outcome = { ok: true, message: catalog.complete ? 'Актуальные роли сервера.' : 'Список актуальных ролей сокращён и не является полным.', data: catalog }
             } else if (name === 'get_member') {
-                if (args.query) {
+                const aliasedId = args.query ? aliasId(args.query) : undefined
+                if (aliasedId) {
+                    const member = await readMember(aliasedId, signal)
+                    outcome = { ok: true, message: 'Серверное обращение однозначно связано с основным аккаунтом участника; это не упоминание роли.',
+                        data: { entries: [memberData(member)], complete: true, ambiguous: false, matchType: 'server_alias' } }
+                } else if (args.query) {
                     const matches = await rest<APIGuildMember[]>('get', Routes.guildMembersSearch(ctx.guildId), signal, undefined, new URLSearchParams({ query: args.query, limit: String(SEARCH_LIMIT) }))
                     requireThat(Array.isArray(matches), 'Discord вернул некорректный результат поиска участников.')
                     const entries: ReturnType<typeof memberData>[] = []
@@ -431,7 +526,14 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
                     requireThat(message?.id === args.messageId && message.channel_id === ctx.channelId, 'Сообщение не принадлежит каналу текущего запроса.')
                     if (name === 'create_thread') requireThat(!message.thread && !((message.flags ?? 0) & 32), 'У этого сообщения уже есть ветка.')
                 } else if (!creating) {
-                    literal = await bindMember(command, state.target!, signal)
+                    let recipient = command
+                    if (name === 'notify_member') {
+                        const parsed = notificationRecipient(command, state.target!, aliases.filter(alias => alias.userId === args.userId).flatMap(alias => alias.names))
+                        recipient = parsed.recipient
+                        assertNotificationDelivery(parsed.tail, notificationQuestion)
+                        await rejectAdditionalRecipients(parsed.tail, args.userId, signal)
+                    }
+                    if (name !== 'notify_member' || aliasId(recipient) !== args.userId) literal = await bindMember(recipient, state.target!, signal)
                 }
                 state = await authorize(signal, name === 'delete_message' ? undefined : args.userId)
                 if (literal) requireThat(names(state.target!).some(n => n.toLocaleLowerCase() === literal!.toLocaleLowerCase()), 'Имя участника изменилось во время проверки. Используйте упоминание или ID.')
@@ -444,6 +546,12 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
                 // A resolved Discord REST write is a confirmed 2xx; do not discard
                 // that receipt by checking cancellation after the confirmed response.
                 let creationUrl: string | undefined
+                if (name === 'notify_member') {
+                    requireThat(id.safeParse(created?.id).success && created.channel_id === ctx.channelId &&
+                        created.author?.id === ctx.botId && created.content === (write.body as { content: string }).content,
+                        'Discord не подтвердил отправку адресного сообщения в текущем канале.')
+                    creationUrl = `https://discord.com/channels/${ctx.guildId}/${ctx.channelId}/${created.id}`
+                }
                 if (creating) {
                     requireThat(id.safeParse(created?.id).success, 'Discord не вернул идентификатор созданного объекта.')
                     if (name === 'create_poll') {
@@ -462,13 +570,15 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
                     ? args.nickname === null ? `Никнейм участника ID ${targetId} сброшен.` : `Никнейм участника ID ${targetId} изменён на «${safeNickname}».`
                     : name === 'set_timeout'
                         ? args.minutes === 0 ? `Таймаут участника ID ${targetId} снят.` : `Участнику ID ${targetId} установлен таймаут на ${args.minutes} мин.`
-                        : name === 'delete_message' ? `Сообщение ID ${targetId} удалено из текущего канала.`
+                        : name === 'notify_member' ? `Сообщение с упоминанием участника отправлено: ${creationUrl}`
+                            : name === 'delete_message' ? `Сообщение ID ${targetId} удалено из текущего канала.`
                             : name === 'create_poll' ? `Опрос создан: ${creationUrl}\nСрок: ${args.durationHours} ч.; ${args.allowMultiselect ? 'можно выбрать несколько вариантов' : 'один вариант ответа'}.`
                                 : name === 'create_thread' ? `Публичная ветка создана: ${creationUrl}`
                                     : `Роль Employee ${args.enabled ? 'добавлена участнику' : 'снята с участника'} ID ${targetId}.`
                 outcome = { ok: true, changed: true, message, data: { targetId, requestId: ctx.requestId, ...(creationUrl ? { url: creationUrl } : {}) } }
             }
         } catch (error) {
+            if (error instanceof Denied) reasonCode = error.code
             const status = typeof error === 'object' && error !== null && 'status' in error ? Number(error.status) : undefined
             const rateLimited = error instanceof RateLimitError
             const rejected = rateLimited || (status !== undefined && status >= 400 && status < 500 && status !== 408)
@@ -482,7 +592,7 @@ export function createDiscordTools(context: DiscordToolContext): ToolBackend {
         }
         try {
             console.info('[discord-tool]', JSON.stringify({ name: name ?? 'unknown', actorId: ctx.actorId, targetId, requestId: ctx.requestId,
-                outcome: outcome.uncertain ? 'uncertain' : outcome.changed ? 'changed' : outcome.ok ? 'read' : 'denied' }))
+                outcome: outcome.uncertain ? 'uncertain' : outcome.changed ? 'changed' : outcome.ok ? 'read' : 'denied', ...(reasonCode ? { reasonCode } : {}) }))
         } catch { /* Audit output must never replace a confirmed action receipt. */ }
         return outcome
     } }
